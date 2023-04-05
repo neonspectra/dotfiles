@@ -10,6 +10,12 @@ PS1="\[\e[00;37m\]\\$ \[\e[0m\]\[\e[00;31m\]\w\[\e[0m\]\[\e[00;37m\] \[\e[0m\]\[
 export EDITOR=nvim
 export PATH="$HOME/.config/bin:$PATH"
 
+#Homebrew $PATH
+eval "$(/opt/homebrew/bin/brew shellenv)"
+
+#PSPDFKIT - ASDF
+export PATH="$HOME/.asdf/shims:$PATH"
+
 #Theming
 export QT_STYLE_OVERRIDE=kvantum
 
