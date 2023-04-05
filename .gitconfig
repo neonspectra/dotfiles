@@ -1,0 +1,20 @@
+[user]
+	signingkey = 0x2F95A9A4DB17EC7A
+	name = Neon
+	email = neon@neosynth.net
+[init]
+	defaultBranch = main
+[core]
+	excludesFile = ~/.config/git/gitignore_global
+#Large Files
+        packedGitLimit = 512m 
+        packedGitWindowSize = 512m 
+[pack] 
+        deltaCacheSize = 2047m 
+        packSizeLimit = 2047m 
+        windowMemory = 2047m
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true

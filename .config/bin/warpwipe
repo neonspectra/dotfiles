@@ -1,0 +1,33 @@
+#!/bin/bash
+###############
+# warpwipe v1.0.0
+# https://github.com/neonspectra/dotfiles
+###############
+# This script is used to wipe a specified block device really fast compared to a more traditional wipe such as pulling random data from /dev/urandom or something like that. This script works by leveraging AES-NI through openssl to do the heavy lifting of generating random data.
+# DEPENDENCIES: "pv" must be installed before running this script
+# USAGE SAMPLE: warpwipe /dev/sda
+# DISCLAIMER: This script has not been audited and comes with no guarantee of safety or effectiveness for any intended purpose. USE AT YOUR OWN RISK!
+
+function terminate-script {
+echo $(date) - Wipe Aborted
+exit 130
+}
+trap terminate-script INT
+
+if [[ $EUID -ne 0 ]]; then
+        echo "This script must be run as root" 
+        exit 126
+fi
+
+read -r -p "All data will be wiped on device: $1. Are you sure you want to do this? [y/N] " response
+response=${response,,}    # tolower
+if [[ "$response" =~ ^(yes|y)$ ]]
+then
+        echo $(date) - Starting wipe...
+        openssl enc -aes-256-ctr -pass pass:"$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64)" -nosalt < /dev/zero | pv -pterb > $1
+        echo $(date) - Wipe completed.
+        exit
+else
+        echo "Wipe aborted."
+        exit 126
+fi

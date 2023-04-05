@@ -1,0 +1,8 @@
+#set speller "aspell -x -c"
+set softwrap
+bind M-k copy main
+unset linenumbers
+unset autoindent
+set view
+
+include "~/.config/nano/syntax/*.nanorc"

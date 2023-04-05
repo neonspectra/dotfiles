@@ -1,0 +1,2 @@
+#!/bin/bash
+qvm-run --pass-io $1 'cat '"$2" > $3

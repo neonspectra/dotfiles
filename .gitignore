@@ -1,0 +1,64 @@
+# Ignore everything by default, except the files we want to include here
+/*
+
+# Add our /home/xue configs here
+!.gitignore
+
+# X11
+!.Xmodmap
+
+# Git
+!.gitconfig
+
+# Bash
+!.bash_aliases
+!.bash_profile
+!.bashrc
+
+# ssh
+!.ssh/
+.ssh/*
+!.ssh/config
+
+# themes
+!.gtkrc-2.0
+!.themes/
+
+# .config
+!.config/
+.config/*
+!.config/konsolerc
+!.config/i3/
+!.config/nvim/
+!.config/nano/
+!.config/neofetch/
+!.config/ranger/
+!.config/git/
+!.config/Kvantum/
+!.config/gtk-3.0/
+
+# Local scripts folder in .config
+!.config/bin/
+
+# gpg config - NOT KEYS
+!.config/gnupg/
+.config/gnupg/*
+!.config/gnupg/gpg.conf
+!.config/gnupg/gpg-agent.conf
+.config/gnupg/vaults/
+.config/gnupg/vaults/*
+
+# .local
+!.local/
+.local/*
+!.local/share/
+.local/share/*
+!.local/share/fonts/
+.local/share/fonts/.uuid
+!.local/share/plasma/
+.local/share/plasma/*
+!.local/share/plasma/desktoptheme/
+.local/share/plasma/desktoptheme/*
+!.local/share/plasma/desktoptheme/Sweet/
+!.local/share/plasma/desktoptheme/Sweet/
+

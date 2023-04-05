@@ -1,0 +1,12 @@
+#/bin/bash
+#Usage: keyvault /path/to/database.kbdx
+
+cd /tmp/
+function terminate-script {
+echo $(date) - Unlock Aborted
+exit 130
+}
+trap terminate-script INT
+
+gpg -d ~/.config/gnupg/vaults/keyvault.asc | keepassxc --pw-stdin $1
+

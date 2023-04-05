@@ -1,0 +1,93 @@
+LVDS-1 Height 1920x1080=1041
+LVDS-1 Width 1920x1080=636
+LVDS-1 XPosition 1920x1080=1282
+LVDS-1 YPosition 1920x1080=37
+MenuBar=Disabled
+State=AAAA/wAAAAD9AAAAAAAAAnwAAAQDAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAEAAAAWAG0AYQBpAG4AVABvAG8AbABCAGEAcgEAAAAA/////wAAAAAAAAAA
+StatusBar=Disabled
+
+[Desktop Entry]
+DefaultProfile=Profile 1.profile
+
+[DownloadDialog Settings]
+Height 1080=415
+Width 1920=700
+
+[Favorite Profiles]
+Favorites=
+
+[FileLocation]
+scrollbackUseCacheLocation=false
+scrollbackUseSystemLocation=true
+
+[KFileDialog Settings]
+Recent Files[$e]=1324581185543.png,file:$HOME/.config/wp.png,file:$HOME/Downloads/1324581185543.png
+Recent URLs[$e]=file:$HOME/.config/,file:$HOME/Downloads/
+detailViewIconSize=0
+
+[KonsoleWindow]
+ShowMenuBarByDefault=false
+
+[MainWindow]
+:0.0 Height 1920x1200=570
+:0.0 Width 1920x1200=956
+Height 1080=1041
+Height 1200=1161
+Height 1440=1401
+Height 1620=480
+Height 768=729
+LVDS-1 Height 1080=1041
+LVDS-1 Height 1920x1080=1041
+LVDS-1 VGA-1 HDMI-3 Height 1080=1041
+LVDS-1 VGA-1 HDMI-3 Width 1920=1916
+LVDS-1 VGA-1 Height 1024x768=729
+LVDS-1 VGA-1 Height 1080=1041
+LVDS-1 VGA-1 Width 1024x768=1020
+LVDS-1 VGA-1 Width 1920=1916
+LVDS-1 VGA-1 XPosition=962
+LVDS-1 VGA-1 YPosition=37
+LVDS-1 Width 1920=956
+LVDS-1 Width 1920x1080=636
+LVDS-1 XPosition=2
+LVDS-1 XPosition 1920x1080=1282
+LVDS-1 YPosition=37
+LVDS-1 YPosition 1920x1080=37
+MenuBar=Disabled
+State=AAAA/wAAAAD9AAAAAAAAAnwAAAQRAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAEAAAAWAG0AYQBpAG4AVABvAG8AbABCAGEAcgAAAAAA/////wAAAAAAAAAA
+StatusBar=Disabled
+VGA-1 HDMI-3 DP-2 Height 1080=1041
+VGA-1 HDMI-3 DP-2 Height 1200=1161
+VGA-1 HDMI-3 DP-2 Height 1920x1200=1161
+VGA-1 HDMI-3 DP-2 Height 2560x1080=1041
+VGA-1 HDMI-3 DP-2 Width 1920=956
+VGA-1 HDMI-3 DP-2 Width 1920x1200=1916
+VGA-1 HDMI-3 DP-2 Width 2560=2556
+VGA-1 HDMI-3 DP-2 Width 2560x1080=849
+VGA-1 HDMI-3 DP-2 XPosition=4482
+VGA-1 HDMI-3 DP-2 XPosition 1920x1200=4482
+VGA-1 HDMI-3 DP-2 XPosition 2560x1080=3629
+VGA-1 HDMI-3 DP-2 YPosition=37
+VGA-1 HDMI-3 DP-2 YPosition 1920x1200=37
+VGA-1 HDMI-3 DP-2 YPosition 2560x1080=157
+VGA-1 HDMI-3 Height 1024x768=729
+VGA-1 HDMI-3 Height 1920x1200=1161
+VGA-1 HDMI-3 Width 1024x768=1020
+VGA-1 HDMI-3 Width 1920x1200=636
+VGA-1 HDMI-3 XPosition=1927
+VGA-1 HDMI-3 XPosition 1024x768=4482
+VGA-1 HDMI-3 XPosition 1920x1200=1282
+VGA-1 HDMI-3 YPosition=113
+VGA-1 HDMI-3 YPosition 1024x768=37
+VGA-1 HDMI-3 YPosition 1920x1200=37
+VGA-1 Height 1920x1200=1161
+VGA-1 Width 1920x1200=1916
+Width 1024=1020
+Width 1366=1362
+Width 1920=1916
+Width 2560=1276
+Width 2880=640
+Window-Maximized 1620x2880=true
+
+[PrintOptions]
+PrinterFriendly=true
+ScaleOutput=true

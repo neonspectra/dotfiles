@@ -1,0 +1,5 @@
+#!/bin/bash
+# Gets the drive serial for a specified drive
+# USAGE: serial /dev/sda
+udevadm info --query=all --name=$1 | grep ID_SERIAL
+
