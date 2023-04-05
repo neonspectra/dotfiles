@@ -22,7 +22,7 @@ noremap <C-a> 0
 noremap <C-e> $
 noremap <BS> X
 
-" other shit
+" other
 
 " h to start visual line since I use v to scroll
 noremap h v
@@ -45,3 +45,17 @@ noremap <F3> :set spell!<CR>
 noremap <F4> z=
 "" Add to dictionary
 noremap <F5> zg
+
+" Load packer
+lua require('plugins')
+
+" Hop
+noremap ff :HopWord<CR>
+noremap fe :HopLineStart<CR>
+noremap fv :HopVertical<CR>
+noremap fg :HopChar1<CR>
+noremap fgg :HopChar2<CR>
+noremap f/ :HopPattern<CR>
+
+" Disable mouse
+set mouse=
