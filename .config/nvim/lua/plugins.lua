@@ -25,7 +25,7 @@ return require('packer').startup(function(use)
     'phaazon/hop.nvim',
     branch = 'v2',
     config = function()
-      require'hop'.setup {}
+      require('hop').setup {}
     end
   }
   -- Automatically set up your configuration after cloning packer.nvim
