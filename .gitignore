@@ -38,6 +38,7 @@
 !.config/git/
 !.config/Kvantum/
 !.config/gtk-3.0/
+!.config/lavandula/
 
 # Local scripts folder in .config
 !.config/bin/
