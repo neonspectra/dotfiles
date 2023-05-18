@@ -27,6 +27,7 @@
 # .config
 !.config/
 .config/*
+!.config/kitty/
 !.config/konsolerc
 !.config/i3/
 !.config/nvim/
