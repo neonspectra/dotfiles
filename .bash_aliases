@@ -1,7 +1,7 @@
 
 ### yt-dlp ###
 # Alias for downloading Youtube videos with yt-dlp in a way that embeds all video information. Uses the Android client extractor to avoid throttling.
-alias yt='yt-dlp --extractor-args "youtube:player_client=android" --sponsorblock-remove sponsor,selfpromo --write-subs --write-auto-subs --embed-subs --embed-chapters --embed-thumbnail --add-metadata'
+alias yt='yt-dlp --sponsorblock-remove sponsor,selfpromo --write-subs --write-auto-subs --embed-subs --embed-chapters --embed-thumbnail --add-metadata'
 
 ### tmux ###
 # Creates a new session with given name. Attaches if a session of that name already exists.
