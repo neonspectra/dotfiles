@@ -22,7 +22,12 @@ alias gpgset='export GPG_TTY=$(tty)'
 # Command for recursively searching for any file with a specified name under the current directoy
 alias search="find -type f -iname" # Takes commands in the form of $ search "some_shit*"
 # Search the contents of all files under the current directory recursively to find a specific term
-alias examine='grep -rnw . -e ' # Takes commands in the form of $ examine 'search term'
+# Takes commands in the form of $ examine 'search term'. Uses ggrep if on OSX (BSD grep doesn't have the operators we are using)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  alias examine='ggrep -rnw . -e '
+else
+  alias examine='grep -rnw . -e '
+fi
 
 ### Network ###
 # Get the current public ip address
