@@ -40,6 +40,8 @@
 !.config/Kvantum/
 !.config/gtk-3.0/
 !.config/lavandula/
+!.config/yabai/
+!.config/skhd/
 
 # Local scripts folder in .config
 !.config/bin/
