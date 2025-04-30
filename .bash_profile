@@ -17,3 +17,4 @@ export PATH
 export DESKTOP="KDE"
 
 #test -e "${HOME}/.iterm2_shell_integration.bash" && source "${HOME}/.iterm2_shell_integration.bash"
+export PATH=/opt/homebrew/bin:/Users/neon/.config/bin:/Users/neon/.nix-profile/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:/Users/neon/.local/bin:/Users/neon/bin
