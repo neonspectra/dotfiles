@@ -30,6 +30,7 @@
 !.config/kitty/
 !.config/konsolerc
 !.config/i3/
+!.config/mpv/
 !.config/nvim/
 # Ignore packer auto-generated loader code
 .config/nvim/plugin/packer_compiled.lua
