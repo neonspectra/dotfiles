@@ -44,6 +44,21 @@
 !.config/yabai/
 !.config/skhd/
 
+# pi
+!.pi/
+.pi/*
+!.pi/agent/
+.pi/agent/*
+!.pi/agent/settings.json
+!.pi/agent/keybindings.json
+!.pi/agent/extensions/
+!.pi/agent/extensions/**
+.pi/agent/extensions/**/node_modules/
+.pi/agent/extensions/**/node_modules/*
+.pi/agent/auth.json
+.pi/agent/sessions/
+.pi/agent/sessions/*
+
 # Local scripts folder in .config
 !.config/bin/
 
