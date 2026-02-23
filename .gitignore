@@ -58,6 +58,13 @@
 .pi/agent/auth.json
 .pi/agent/sessions/
 .pi/agent/sessions/*
+!.pi/stateful-memory/
+.pi/stateful-memory/*
+!.pi/stateful-memory/SOUL.md
+!.pi/stateful-memory/PERSONALITY_MATRIX.md
+!.pi/stateful-memory/REGISTER.md
+!.pi/stateful-memory/STYLE.md
+!.pi/stateful-memory/persona_topics/
 
 # Local scripts folder in .config
 !.config/bin/

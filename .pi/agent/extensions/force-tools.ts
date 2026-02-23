@@ -13,6 +13,7 @@ export default function forceTools(pi: ExtensionAPI) {
     "web_search",
     "remember",
     "recall",
+    "browser",
   ];
 
   const enable = () => {

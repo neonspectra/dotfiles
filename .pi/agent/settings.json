@@ -1,6 +1,9 @@
 {
-  "lastChangelogVersion": "0.51.6",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.2-codex",
-  "defaultThinkingLevel": "off"
+  "lastChangelogVersion": "0.54.0",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-6",
+  "defaultThinkingLevel": "off",
+  "packages": [
+    "npm:pi-agent-browser"
+  ]
 }
