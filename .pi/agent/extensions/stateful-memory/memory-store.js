@@ -139,11 +139,12 @@ export function parseMemoryLine(line) {
 }
 
 export class MemoryStore {
-  constructor({ memoryDir, personaFile, auxiliaryPersonaFiles = [], userFile, memoryFile }) {
+  constructor({ memoryDir, personaFile, auxiliaryPersonaFiles = [], factsFile, wakeFile, memoryFile }) {
     this.memoryDir = memoryDir;
     this.personaFile = personaFile;
     this.auxiliaryPersonaFiles = auxiliaryPersonaFiles;
-    this.userFile = userFile;
+    this.factsFile = factsFile;
+    this.wakeFile = wakeFile;
     this.memoryFile = memoryFile;
     this.sessionPath = "unknown";
     this.sessionStartedAt = new Date();
@@ -194,10 +195,10 @@ export class MemoryStore {
       );
     }
 
-    if (this.userFile) {
+    if (this.factsFile) {
       await this.#ensureFile(
-        this.userFile,
-        defaultUserProfile ?? "# User Profile\n"
+        this.factsFile,
+        defaultUserProfile ?? "# Pinned Facts\n"
       );
     }
   }
@@ -225,11 +226,18 @@ export class MemoryStore {
     return parts.filter(Boolean).join("\n\n---\n\n");
   }
 
-  async readUserProfile() {
-    if (!this.userFile) {
+  async readFacts() {
+    if (!this.factsFile) {
       return "";
     }
-    return this.#readFileSafe(this.userFile);
+    return this.#readFileSafe(this.factsFile);
+  }
+
+  async readWakeContext() {
+    if (!this.wakeFile) {
+      return "";
+    }
+    return this.#readFileSafe(this.wakeFile);
   }
 
   async #readFileSafe(filePath) {
@@ -358,8 +366,8 @@ export class MemoryStore {
     return lines;
   }
 
-  async appendUserProfile(items, { heading = "Learned Facts" } = {}) {
-    if (!this.userFile) {
+  async appendFacts(items, { heading = "Learned Facts" } = {}) {
+    if (!this.factsFile) {
       return [];
     }
 
@@ -372,7 +380,7 @@ export class MemoryStore {
       return [];
     }
 
-    let current = await this.#readFileSafe(this.userFile);
+    let current = await this.#readFileSafe(this.factsFile);
     const header = `## ${heading}`;
 
     if (!current.includes(header)) {
@@ -382,7 +390,7 @@ export class MemoryStore {
     }
 
     current += `${additions.join("\n")}\n`;
-    await fs.writeFile(this.userFile, current, "utf8");
+    await fs.writeFile(this.factsFile, current, "utf8");
     return additions;
   }
 }

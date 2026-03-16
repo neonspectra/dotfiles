@@ -5,7 +5,8 @@ import { StringEnum } from "@mariozechner/pi-ai";
 
 import { loadConfig, resolvePath } from "./config.js";
 import { MemoryStore, slugifyKeywords, slugifyTopic } from "./memory-store.js";
-import { buildTranscriptFromEntries, readSessionJsonl } from "./session-utils.js";
+import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
+import { runSleepCycle } from "./memory-sleep.js";
 import { summarizeSessionWithModel } from "./memory-summary.js";
 import { planRecallWithModel, recallWithModel } from "./memory-recall.js";
 import { scoreEntry, tokenize } from "./memory-retriever.js";
@@ -20,7 +21,7 @@ import {
 
 const DEFAULT_PERSONA = `# Soul\n\nYou are a warm, curious, and reliable AI companion who remembers important facts across sessions. You speak clearly and kindly, prioritize accuracy, and treat stored memories as trustworthy recollections. When you are unsure, you ask clarifying questions rather than guessing.\n`;
 
-const DEFAULT_USER_PROFILE = `# User Profile\n\n## Known Facts\n- (empty)\n`;
+const DEFAULT_FACTS = `# Pinned Facts\n\n## Known Facts\n- (empty)\n`;
 
 const STATE_ENTRY = "stateful-memory";
 
@@ -32,6 +33,20 @@ export default function (pi) {
   let lastSessionPath = null;
   let pendingResumeSessionPath = null;
   let pendingSessionInit = false;
+  let activeTopics = new Map(); // topicId -> { counter, maxCounter }
+
+  function getLastAssistantMessage(ctx) {
+    const branch = ctx.sessionManager.getBranch();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry.type === "message" && entry.message?.role === "assistant") {
+        const text = extractText(entry.message.content ?? "");
+        // Cap to prevent a long response from dominating the topic score
+        return text.slice(0, config?.topicPreviousMessageMaxChars ?? 500);
+      }
+    }
+    return "";
+  }
 
   async function loadStore(cwd) {
     if (!config) {
@@ -46,7 +61,8 @@ export default function (pi) {
         auxiliaryPersonaFiles: (config.auxiliaryPersonaFiles ?? []).map((f) =>
           resolvePath(cwd, f)
         ),
-        userFile: resolvePath(cwd, config.userFile),
+        factsFile: resolvePath(cwd, config.factsFile),
+        wakeFile: resolvePath(cwd, config.wakeFile),
       });
     }
   }
@@ -117,7 +133,7 @@ export default function (pi) {
 
     await store.ensureFiles({
       defaultPersona: DEFAULT_PERSONA,
-      defaultUserProfile: DEFAULT_USER_PROFILE,
+      defaultUserProfile: DEFAULT_FACTS,
     });
 
     pendingSessionInit = false;
@@ -158,9 +174,10 @@ export default function (pi) {
   }
 
   async function buildSystemPromptAddon() {
-    const [persona, userProfile, allEntries] = await Promise.all([
+    const [persona, facts, wakeContext, allEntries] = await Promise.all([
       store.readPersona(),
-      store.readUserProfile(),
+      store.readFacts(),
+      store.readWakeContext(),
       store.readAllMemoryEntries(),
     ]);
 
@@ -181,7 +198,8 @@ export default function (pi) {
 
     const memorySection = buildMemorySection({
       persona,
-      userProfile,
+      facts,
+      wakeContext,
       memories: combinedMemories,
       recentMemories,
     });
@@ -190,7 +208,7 @@ export default function (pi) {
     return [instructions, memorySection].filter(Boolean).join("\n\n").trim();
   }
 
-  async function selectTopicsForPrompt({ query, scope, maxResults, minScore, ctx }) {
+  async function selectTopicsForPrompt({ query, scope, maxResults, minScore, ctx, updateActiveTopics = false }) {
     if (!query?.trim()) {
       return { selected: [], addendum: "" };
     }
@@ -206,7 +224,34 @@ export default function (pi) {
       scope,
       maxResults,
       minScore,
+      activeTopics: updateActiveTopics ? activeTopics : new Map(),
     });
+
+    if (updateActiveTopics) {
+      const persistenceCount = config.topicPersistenceCount ?? 3;
+      const selectedIds = new Set(selected.map((t) => t.id));
+
+      // Decrement counter for persisted topics not freshly selected; remove at 0
+      for (const [id, state] of activeTopics) {
+        if (selectedIds.has(id)) {
+          activeTopics.set(id, { counter: persistenceCount, maxCounter: persistenceCount });
+        } else {
+          const newCounter = state.counter - 1;
+          if (newCounter <= 0) {
+            activeTopics.delete(id);
+          } else {
+            activeTopics.set(id, { ...state, counter: newCounter });
+          }
+        }
+      }
+
+      // Register newly selected topics that weren't already tracked
+      for (const topic of selected) {
+        if (!activeTopics.has(topic.id)) {
+          activeTopics.set(topic.id, { counter: persistenceCount, maxCounter: persistenceCount });
+        }
+      }
+    }
 
     const addendum = await buildTopicAddendum({ topics: selected });
     return { selected, addendum };
@@ -567,6 +612,7 @@ export default function (pi) {
     pendingResumeSessionPath = null;
     pendingSessionInit = false;
     topicLocked = false;
+    activeTopics = new Map();
     await ensureSessionState(ctx);
     if (ctx.hasUI) {
       ctx.ui.setStatus("stateful-memory", "Memory: ready");
@@ -577,14 +623,20 @@ export default function (pi) {
     await ensureSessionState(ctx);
     await maybeSetTopicFromPrompt(event.prompt, ctx);
 
+    // Score against current user message + previous assistant message for symmetric
+    // topic relevance — brief replies won't drop a topic that was just being discussed.
+    const lastAssistantMsg = getLastAssistantMessage(ctx);
+    const combinedQuery = [event.prompt, lastAssistantMsg].filter(Boolean).join("\n");
+
     const [addon, topicSelection] = await Promise.all([
       buildSystemPromptAddon(),
       selectTopicsForPrompt({
-        query: event.prompt,
+        query: combinedQuery,
         scope: "system",
         maxResults: 3,
         minScore: 1,
         ctx,
+        updateActiveTopics: true,
       }),
     ]);
 
@@ -725,12 +777,12 @@ export default function (pi) {
       const target = params.target ?? "memory";
 
       if (target === "profile") {
-        const stored = await store.appendUserProfile(params.items);
+        const stored = await store.appendFacts(params.items);
         return {
           content: [
             {
               type: "text",
-              text: `Saved ${stored.length} profile item(s).`,
+              text: `Saved ${stored.length} fact(s) to pinned facts.`,
             },
           ],
           details: { stored },
@@ -893,7 +945,7 @@ export default function (pi) {
         query: params.query,
         selectedMemories,
         sessionExcerpts,
-        maxTokens: config.memoryModelMaxTokens,
+        maxTokens: config.recallModelMaxTokens,
         temperature: config.memoryModelTemperature,
       });
 
@@ -910,6 +962,45 @@ export default function (pi) {
           sessionExcerpts,
         },
       };
+    },
+  });
+
+  pi.registerCommand("sleep", {
+    description: "Run the sleep cycle: capture session, write WAKE.md, curate FACTS.md, dream. Then open a fresh session.",
+    handler: async (_args, ctx) => {
+      await ctx.waitForIdle();
+
+      const confirmed = await ctx.ui.confirm(
+        "Sleep cycle",
+        "Capture this session, run WAKE.md + FACTS.md + dream phases, then open a fresh session?"
+      );
+      if (!confirmed) {
+        ctx.ui.notify("Sleep cancelled.", "info");
+        return;
+      }
+
+      await ensureSessionState(ctx);
+
+      if (!hasActiveMemoryFile()) {
+        ctx.ui.notify("Memory not ready — session file not persisted yet. Try again in a moment.", "warning");
+        return;
+      }
+
+      try {
+        await runSleepCycle({
+          ctx,
+          config,
+          store,
+          summarizeCurrentSession,
+        });
+      } catch (err) {
+        ctx.ui.notify(`Sleep cycle error: ${err.message}`, "error");
+        console.error("[sleep] Cycle error:", err);
+        return;
+      }
+
+      ctx.ui.notify("Sleep complete. Opening fresh session...", "info");
+      await ctx.newSession();
     },
   });
 }

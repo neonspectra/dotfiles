@@ -1,9 +1,12 @@
 {
-  "lastChangelogVersion": "0.54.0",
+  "lastChangelogVersion": "0.58.3",
   "defaultProvider": "anthropic",
-  "defaultModel": "claude-sonnet-4-6",
-  "defaultThinkingLevel": "off",
+  "defaultModel": "claude-opus-4-6",
+  "defaultThinkingLevel": "medium",
   "packages": [
     "npm:pi-agent-browser"
-  ]
+  ],
+  "compaction": {
+    "enabled": false
+  }
 }

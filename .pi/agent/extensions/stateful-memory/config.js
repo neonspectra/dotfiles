@@ -8,14 +8,20 @@ const DEFAULT_CONFIG = {
   auxiliaryPersonaFiles: [
     "stateful-memory/STYLE.md",
     "stateful-memory/REGISTER.md",
+    "stateful-memory/SLEEP.md",
   ],
-  userFile: "stateful-memory/USER.md",
+  factsFile: "stateful-memory/FACTS.md",
+  wakeFile: "stateful-memory/WAKE.md",
+  dreamsDir: "stateful-memory/dreams",
   memoryModel: "openai-codex:gpt-5.1-codex-mini",
   memoryModelMaxTokens: 512,
+  recallModelMaxTokens: 1024,
   memoryModelTemperature: 0,
   sessionSummaryMaxChars: 12000,
   recallMaxSessionChars: 12000,
   topicsFile: "stateful-memory/PERSONALITY_MATRIX.md",
+  topicPersistenceCount: 3,
+  topicPreviousMessageMaxChars: 500,
 };
 
 const CONFIG_FILENAME = ".pi/stateful-memory.json";
@@ -38,7 +44,7 @@ async function readConfigFile(configPath) {
   }
 }
 
-const PATH_KEYS = ["memoryDir", "personaFile", "userFile", "topicsFile"];
+const PATH_KEYS = ["memoryDir", "personaFile", "factsFile", "wakeFile", "dreamsDir", "topicsFile"];
 const PATH_ARRAY_KEYS = ["auxiliaryPersonaFiles"];
 
 function resolveRelative(value, baseDir) {
@@ -103,10 +109,15 @@ export async function loadConfig(cwd) {
     memoryDir: process.env.PI_STATEFUL_MEMORY_DIR,
     personaFile: process.env.PI_STATEFUL_MEMORY_PERSONA_FILE,
     auxiliaryPersonaFiles,
-    userFile: process.env.PI_STATEFUL_MEMORY_USER_FILE,
+    factsFile: process.env.PI_STATEFUL_MEMORY_FACTS_FILE,
+    wakeFile: process.env.PI_STATEFUL_MEMORY_WAKE_FILE,
+    dreamsDir: process.env.PI_STATEFUL_MEMORY_DREAMS_DIR,
     memoryModel: process.env.PI_STATEFUL_MEMORY_MODEL,
     memoryModelMaxTokens: process.env.PI_STATEFUL_MEMORY_MODEL_MAX_TOKENS
       ? Number(process.env.PI_STATEFUL_MEMORY_MODEL_MAX_TOKENS)
+      : undefined,
+    recallModelMaxTokens: process.env.PI_STATEFUL_MEMORY_RECALL_MAX_TOKENS
+      ? Number(process.env.PI_STATEFUL_MEMORY_RECALL_MAX_TOKENS)
       : undefined,
     memoryModelTemperature: process.env.PI_STATEFUL_MEMORY_MODEL_TEMPERATURE
       ? Number(process.env.PI_STATEFUL_MEMORY_MODEL_TEMPERATURE)
