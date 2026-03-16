@@ -2,9 +2,6 @@
 # ~/.bashrc
 #
 
-# If not running interactively, don't do anything
-[[ $- != *i* ]] && return
-
 # === Platform Detection ===
 # Sets __platform to one of: macos, nixos, ubuntu, linux, unknown
 # Reference this variable for any platform-specific logic below.
@@ -20,6 +17,26 @@ else
 	__platform="unknown"
 fi
 
+# === Environment (applies to all shells, including non-interactive) ===
+export EDITOR=nvim
+export PATH="$HOME/.config/bin:$PATH"
+
+# === Local Secrets ===
+# API keys, tokens, etc. — not committed to dotfiles
+if [ -f ~/.config/secrets.env ]; then
+	. ~/.config/secrets.env
+fi
+
+# === Local Overrides (early) ===
+# Machine-specific PATH and env — sourced before the interactive guard
+# so non-interactive shells (e.g., Pi agent) get them too.
+if [ -f ~/.bashrc.local ]; then
+	. ~/.bashrc.local
+fi
+
+# If not running interactively, don't do anything past this point
+[[ $- != *i* ]] && return
+
 # === History ===
 HISTCONTROL=ignoreboth
 HISTSIZE=1000
@@ -29,10 +46,8 @@ shopt -s histappend
 # === Shell Options ===
 shopt -s checkwinsize
 
-# === Environment ===
+# === Prompt ===
 PS1="\[\e[00;37m\]\\$ \[\e[0m\]\[\e[00;31m\]\w\[\e[0m\]\[\e[00;37m\] \[\e[0m\]\[\e[00;36m\]\u@\h\[\e[0m\]\[\e[00;37m\] > \[\e[0m\]"
-export EDITOR=nvim
-export PATH="$HOME/.config/bin:$PATH"
 
 # === Theming ===
 if [[ "$__platform" != "macos" ]]; then
@@ -83,14 +98,4 @@ if [ -d "$GNUPGHOME" ] && ! grep -q "^pinentry-program" "$GNUPGHOME/gpg-agent.co
 	gpg-connect-agent reloadagent /bye 2>/dev/null
 fi
 
-# === Local Secrets ===
-# API keys, tokens, etc. — not committed to dotfiles
-if [ -f ~/.config/secrets.env ]; then
-	. ~/.config/secrets.env
-fi
 
-# === Local Overrides ===
-# Machine-specific config that doesn't belong in dotfiles
-if [ -f ~/.bashrc.local ]; then
-	. ~/.bashrc.local
-fi
