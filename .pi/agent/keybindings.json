@@ -1,0 +1,4 @@
+{
+  "pageUp": ["pageUp", "ctrl+shift+up"],
+  "pageDown": ["pageDown", "ctrl+shift+down"]
+}

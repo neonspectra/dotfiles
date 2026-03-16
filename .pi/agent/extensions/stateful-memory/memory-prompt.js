@@ -1,6 +1,7 @@
 export function buildMemorySection({
   persona,
-  userProfile,
+  facts,
+  wakeContext,
   memories,
   recentMemories,
 }) {
@@ -10,8 +11,12 @@ export function buildMemorySection({
     sections.push(`### Persona\n${persona.trim()}`);
   }
 
-  if (userProfile?.trim()) {
-    sections.push(`### User Profile\n${userProfile.trim()}`);
+  if (wakeContext?.trim()) {
+    sections.push(`### Current Context\n${wakeContext.trim()}`);
+  }
+
+  if (facts?.trim()) {
+    sections.push(`### Pinned Facts\n${facts.trim()}`);
   }
 
   if (recentMemories?.length) {

@@ -100,25 +100,38 @@ function scoreTopic(topic, queryTokens) {
   return overlap + (topic.priority ?? 0) * 0.5;
 }
 
-export function selectTopics({ query, topics, scope, maxResults = 3, minScore = 1 }) {
+export function selectTopics({ query, topics, scope, maxResults = 3, minScore = 1, activeTopics = new Map() }) {
   const queryTokens = new Set(tokenize(query ?? ""));
-  if (queryTokens.size === 0) {
-    return [];
+  const scopeKey = scope ? String(scope).toLowerCase() : null;
+
+  const candidates = [];
+
+  for (const topic of topics) {
+    if (scopeKey && !topic.scope.includes(scopeKey)) {
+      continue;
+    }
+
+    const freshScore = queryTokens.size > 0 ? scoreTopic(topic, queryTokens) : 0;
+    const activeState = activeTopics.get(topic.id);
+
+    // Quadratic persistence decay: minScore × (counter/maxCounter)²
+    // Gives topics a synthetic score that survives quiet turns without blocking fresh ones.
+    const persistenceScore = activeState
+      ? minScore * Math.pow(activeState.counter / activeState.maxCounter, 2)
+      : 0;
+
+    const effectiveScore = Math.max(freshScore, persistenceScore);
+
+    // Include if: fresh signal meets threshold OR topic is currently persisted (counter > 0)
+    if (freshScore >= minScore || activeState) {
+      candidates.push({ topic, effectiveScore });
+    }
   }
 
-  const scopeKey = scope ? String(scope).toLowerCase() : null;
-  const scored = topics
-    .filter((topic) => !scopeKey || topic.scope.includes(scopeKey))
-    .map((topic) => ({
-      topic,
-      score: scoreTopic(topic, queryTokens),
-    }))
-    .filter((item) => item.score >= minScore)
-    .sort((a, b) => b.score - a.score)
+  return candidates
+    .sort((a, b) => b.effectiveScore - a.effectiveScore)
     .slice(0, maxResults)
     .map((item) => item.topic);
-
-  return scored;
 }
 
 function extractTitleAndBody(raw) {
