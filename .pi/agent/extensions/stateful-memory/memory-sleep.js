@@ -17,7 +17,7 @@
  */
 
 import { promises as fs } from "node:fs";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import path from "node:path";
 import {
@@ -34,8 +34,20 @@ import {
 
 const AGENT_DIR = getAgentDir();
 const FORKS_DIR = join(AGENT_DIR, "sessions", "forks");
-const FORK_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — sleep forks read a lot
+const FORK_TIMEOUT_MS = 20 * 60 * 1000; // 20 min per attempt
+const INTER_FORK_COOLDOWN_MS = 10 * 1000;  // 10s between forks to avoid rate-limit stacking
+const MAX_RETRIES = 2;                      // up to 2 retries (3 attempts total)
 const TASK_COMPLETE_MARKER = "TASK_COMPLETE:";
+
+// Fallback model candidates in priority order (provider/id pairs).
+// On repeated timeouts the runner walks this list looking for a model
+// that exists in the registry. If none match, the retry uses the default.
+const FALLBACK_MODEL_CANDIDATES = [
+  ["claude", "claude-sonnet-4-6"],
+  ["claude", "claude-sonnet-4-6 [1m]"],
+  ["minimax", "MiniMax-M2.7"],
+  ["claude", "claude-haiku-4-5"],
+];
 
 // ─── Pre-aggregation ──────────────────────────────────────────────────────────
 // Instead of making forks read 300+ individual session files (which causes
@@ -43,7 +55,9 @@ const TASK_COMPLETE_MARKER = "TASK_COMPLETE:";
 // summaries into a single file before spawning the fork.
 
 async function aggregateSessionSummaries(memoryDir) {
-  const sessionsDir = join(memoryDir, "sessions");
+  // memoryDir already points to the sessions directory (e.g. .../memory/sessions)
+  // so we use it directly rather than appending another "sessions/" segment.
+  const sessionsDir = memoryDir;
   let files;
   try {
     files = (await fs.readdir(sessionsDir))
@@ -66,7 +80,7 @@ async function aggregateSessionSummaries(memoryDir) {
   if (sections.length === 0) return null;
 
   const aggregated = sections.join("\n\n");
-  const outPath = join(memoryDir, "_sleep-session-archive.md");
+  const outPath = join(memoryDir, "..", "_sleep-session-archive.md");
   await fs.writeFile(outPath, aggregated, "utf-8");
   return outPath;
 }
@@ -84,14 +98,11 @@ function formatDreamStamp(date = new Date()) {
   );
 }
 
-// ─── Lightweight fork runner ──────────────────────────────────────────────────
-// Simplified version of the delegate extension's fork runner, scoped to the
-// needs of sleep phases: no depth tracking, no context parameter, 15 min timeout.
+// ─── Shared infra (created once per sleep cycle, reused across retries) ───────
 
-async function runSleepFork({ task, cwd }) {
+function loadSharedInfra(cwd) {
   mkdirSync(FORKS_DIR, { recursive: true });
 
-  // ── Auth + Models ────────────────────────────────────────────────────────
   const authStorage = AuthStorage.create(join(AGENT_DIR, "auth.json"));
   const modelsPath = join(AGENT_DIR, "models.json");
   const modelRegistry = new ModelRegistry(
@@ -99,10 +110,43 @@ async function runSleepFork({ task, cwd }) {
     existsSync(modelsPath) ? modelsPath : undefined
   );
 
-  // ── Settings: disable compaction for forks ───────────────────────────────
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+  // Load real settings so forks inherit defaultProvider/defaultModel
+  const settingsPath = join(AGENT_DIR, "settings.json");
+  let baseSettings = {};
+  try {
+    if (existsSync(settingsPath)) {
+      baseSettings = JSON.parse(
+        readFileSync(settingsPath, "utf-8")
+      );
+    }
+  } catch { /* fall back to empty */ }
 
-  // ── Resource loader: same agentDir = same persona + memory store ─────────
+  return { authStorage, modelRegistry, baseSettings, cwd };
+}
+
+// ─── Find fallback model ──────────────────────────────────────────────────────
+
+function findFallbackModel(modelRegistry) {
+  for (const [provider, id] of FALLBACK_MODEL_CANDIDATES) {
+    const model = modelRegistry.find(provider, id);
+    if (model) {
+      console.log(`[sleep] Fallback model resolved: ${provider}/${id}`);
+      return model;
+    }
+  }
+  return undefined; // caller will use default model resolution
+}
+
+// ─── Single fork attempt ──────────────────────────────────────────────────────
+
+async function executeForkAttempt({ task, infra, model }) {
+  const { authStorage, modelRegistry, baseSettings, cwd } = infra;
+
+  const settingsManager = SettingsManager.inMemory({
+    ...baseSettings,
+    compaction: { enabled: false },
+  });
+
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir: AGENT_DIR,
@@ -110,11 +154,9 @@ async function runSleepFork({ task, cwd }) {
   });
   await resourceLoader.reload();
 
-  // ── Session manager → sessions/forks/ ───────────────────────────────────
   const sessionManager = SessionManager.create(cwd, FORKS_DIR);
 
-  // ── Create fork session ──────────────────────────────────────────────────
-  const { session: forkSession } = await createAgentSession({
+  const sessionOpts = {
     cwd,
     agentDir: AGENT_DIR,
     authStorage,
@@ -122,12 +164,15 @@ async function runSleepFork({ task, cwd }) {
     resourceLoader,
     sessionManager,
     settingsManager,
-  });
+  };
+  // If a specific model was provided (fallback), pass it explicitly
+  if (model) sessionOpts.model = model;
+
+  const { session: forkSession } = await createAgentSession(sessionOpts);
 
   const sessionFile = forkSession.sessionFile ?? `(in-memory-${Date.now()})`;
   console.log(`[sleep] Fork starting — file: ${sessionFile}`);
 
-  // ── Run the fork ─────────────────────────────────────────────────────────
   let fullText = "";
   let lastTurnText = "";
   let agentResolved = false;
@@ -172,11 +217,11 @@ async function runSleepFork({ task, cwd }) {
     console.error(`[sleep] Fork error: ${runError}`);
   }
 
-  // ── Shutdown: trigger memory summarization ───────────────────────────────
-  // Manually fire session_shutdown so stateful-memory writes a session summary.
-  // This makes fork work durable and recallable, same as any other session.
+  // Fire session_shutdown so stateful-memory writes a session summary
   try {
-    await forkSession.agent.waitForIdle();
+    if (agentResolved) {
+      await forkSession.agent.waitForIdle();
+    }
     const runner = forkSession["_extensionRunner"];
     if (runner?.hasHandlers("session_shutdown")) {
       await runner.emit({ type: "session_shutdown" });
@@ -191,7 +236,6 @@ async function runSleepFork({ task, cwd }) {
     return { success: false, error: runError ?? "Unknown error", sessionFile };
   }
 
-  // Extract TASK_COMPLETE: marker from the end of the response
   const markerIdx = runResult.fullText.lastIndexOf(TASK_COMPLETE_MARKER);
   const summary =
     markerIdx !== -1
@@ -200,6 +244,48 @@ async function runSleepFork({ task, cwd }) {
 
   console.log(`[sleep] Fork complete — ${sessionFile}`);
   return { success: true, summary, sessionFile };
+}
+
+// ─── Fork runner with retry + model fallback ──────────────────────────────────
+//
+// Attempt 1: default model (from settings — typically Opus)
+// Attempt 2: same model, after cooldown (transient rate-limit recovery)
+// Attempt 3: fallback to a faster model (Sonnet/Haiku)
+//
+// Each attempt gets the full FORK_TIMEOUT_MS window.
+
+async function runSleepFork({ task, cwd, infra }) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    // Pick model: default for attempts 1-2, fallback for attempt 3+
+    let model = undefined;
+    if (attempt > 2) {
+      model = findFallbackModel(infra.modelRegistry);
+      if (model) {
+        console.log(`[sleep] Attempt ${attempt}: falling back to ${model.name ?? model.id}`);
+      } else {
+        console.log(`[sleep] Attempt ${attempt}: no fallback model found, retrying with default`);
+      }
+    } else if (attempt > 1) {
+      console.log(`[sleep] Attempt ${attempt}: retrying with same model after cooldown`);
+    }
+
+    // Cooldown between retries
+    if (attempt > 1) {
+      const cooldown = INTER_FORK_COOLDOWN_MS * attempt; // escalating: 20s, 30s
+      console.log(`[sleep] Waiting ${cooldown / 1000}s before retry...`);
+      await new Promise((r) => setTimeout(r, cooldown));
+    }
+
+    const result = await executeForkAttempt({ task, infra, model });
+    if (result.success) return result;
+
+    lastError = result.error;
+    console.warn(`[sleep] Attempt ${attempt}/${MAX_RETRIES + 1} failed: ${lastError}`);
+  }
+
+  return { success: false, error: `All ${MAX_RETRIES + 1} attempts failed. Last: ${lastError}`, sessionFile: null };
 }
 
 // ─── Fork task prompts ────────────────────────────────────────────────────────
@@ -385,11 +471,15 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     notify(`Session archive: ${(archiveStats.size / 1024).toFixed(0)}KB`);
   }
 
+  // ── Shared infra for all forks (avoids re-reading settings/auth per attempt)
+  const infra = loadSharedInfra(ctx.cwd);
+
   // ── Phase 1: WAKE.md ───────────────────────────────────────────────────
   notify("Phase 1/3: Writing WAKE.md...");
   const wakeResult = await runSleepFork({
     task: buildWakeTask({ archiveFile: archiveFile ?? "(no sessions found)", wakeFile }),
     cwd: ctx.cwd,
+    infra,
   });
 
   if (!wakeResult.success) {
@@ -398,11 +488,15 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     notify("Phase 1/3: WAKE.md written ✓");
   }
 
+  // ── Inter-fork cooldown ─────────────────────────────────────────────────
+  await new Promise((r) => setTimeout(r, INTER_FORK_COOLDOWN_MS));
+
   // ── Phase 2: FACTS.md ──────────────────────────────────────────────────
   notify("Phase 2/3: Curating FACTS.md...");
   const factsResult = await runSleepFork({
     task: buildFactsTask({ archiveFile: archiveFile ?? "(no sessions found)", factsFile }),
     cwd: ctx.cwd,
+    infra,
   });
 
   if (!factsResult.success) {
@@ -411,11 +505,15 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     notify("Phase 2/3: FACTS.md curated ✓");
   }
 
+  // ── Inter-fork cooldown ─────────────────────────────────────────────────
+  await new Promise((r) => setTimeout(r, INTER_FORK_COOLDOWN_MS));
+
   // ── Phase 3: Dreams ────────────────────────────────────────────────────
   notify("Phase 3/3: Dreaming...");
   const dreamResult = await runSleepFork({
     task: buildDreamTask({ archiveFile: archiveFile ?? "(no sessions found)", topicsDir, dreamFile }),
     cwd: ctx.cwd,
+    infra,
   });
 
   if (!dreamResult.success) {
