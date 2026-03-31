@@ -37,6 +37,40 @@ const FORKS_DIR = join(AGENT_DIR, "sessions", "forks");
 const FORK_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — sleep forks read a lot
 const TASK_COMPLETE_MARKER = "TASK_COMPLETE:";
 
+// ─── Pre-aggregation ──────────────────────────────────────────────────────────
+// Instead of making forks read 300+ individual session files (which causes
+// cascading delegate chains and 25+ minute runtimes), we concatenate all session
+// summaries into a single file before spawning the fork.
+
+async function aggregateSessionSummaries(memoryDir) {
+  const sessionsDir = join(memoryDir, "sessions");
+  let files;
+  try {
+    files = (await fs.readdir(sessionsDir))
+      .filter((f) => f.endsWith(".md"))
+      .sort(); // chronological by filename
+  } catch {
+    return null; // no sessions directory
+  }
+
+  const sections = [];
+  for (const file of files) {
+    const content = await fs.readFile(join(sessionsDir, file), "utf-8");
+    const trimmed = content.trim();
+    // Skip empty stubs (just the header + session path, no actual content)
+    const lines = trimmed.split("\n").filter((l) => l.trim().length > 0);
+    if (lines.length <= 3) continue;
+    sections.push(`--- ${file} ---\n${trimmed}`);
+  }
+
+  if (sections.length === 0) return null;
+
+  const aggregated = sections.join("\n\n");
+  const outPath = join(memoryDir, "_sleep-session-archive.md");
+  await fs.writeFile(outPath, aggregated, "utf-8");
+  return outPath;
+}
+
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
 function pad(n) {
@@ -170,7 +204,7 @@ async function runSleepFork({ task, cwd }) {
 
 // ─── Fork task prompts ────────────────────────────────────────────────────────
 
-function buildWakeTask({ memoryDir, wakeFile }) {
+function buildWakeTask({ archiveFile, wakeFile }) {
   return [
     "=== SLEEP PHASE: WAKE.md ===",
     "",
@@ -179,10 +213,13 @@ function buildWakeTask({ memoryDir, wakeFile }) {
     "until the next sleep cycle replaces it.",
     "",
     "Step 1: Read your session memory archive.",
-    `The session memory files live in: ${memoryDir}`,
-    "Read through the session summary files to get the full landscape of your history.",
-    "For the most recent 10-15 sessions, also read the raw JSONL files referenced in",
-    "the session summaries if you need more texture and detail.",
+    `All session summaries have been pre-aggregated into a single file: ${archiveFile}`,
+    "Read this file to get the full landscape of your history. It's already in",
+    "chronological order with empty stubs filtered out.",
+    "The file may be large — use offset/limit to continue reading until you have it all.",
+    "",
+    "DO NOT delegate this work or spawn sub-tasks. The file is ready to read directly.",
+    "DO NOT attempt to read individual session files or raw JSONL session logs.",
     "",
     "The early sessions from February 2026 are mostly test noise from when the memory",
     "system was being built. Treat them as background and don't let them dominate.",
@@ -207,7 +244,7 @@ function buildWakeTask({ memoryDir, wakeFile }) {
   ].join("\n");
 }
 
-function buildFactsTask({ memoryDir, factsFile }) {
+function buildFactsTask({ archiveFile, factsFile }) {
   return [
     "=== SLEEP PHASE: FACTS.md ===",
     "",
@@ -215,9 +252,12 @@ function buildFactsTask({ memoryDir, factsFile }) {
     "the pinned working memory that's always present in your context.",
     "",
     "Step 1: Read your full session archive.",
-    `The session memory files live in: ${memoryDir}`,
-    "Read all session summaries to get the full picture. For recent sessions where",
-    "you need more detail, read the raw JSONL files referenced in the summaries.",
+    `All session summaries have been pre-aggregated into a single file: ${archiveFile}`,
+    "Read this file to get the full picture.",
+    "The file may be large — use offset/limit to continue reading until you have it all.",
+    "",
+    "DO NOT delegate this work or spawn sub-tasks. The file is ready to read directly.",
+    "DO NOT attempt to read individual session files or raw JSONL session logs.",
     "",
     `Step 2: Read the current FACTS.md at: ${factsFile}`,
     "",
@@ -242,7 +282,7 @@ function buildFactsTask({ memoryDir, factsFile }) {
   ].join("\n");
 }
 
-function buildDreamTask({ memoryDir, topicsDir, dreamFile }) {
+function buildDreamTask({ archiveFile, topicsDir, dreamFile }) {
   return [
     "=== SLEEP PHASE: DREAMS ===",
     "",
@@ -254,8 +294,13 @@ function buildDreamTask({ memoryDir, topicsDir, dreamFile }) {
     "Read through them to know where your current thinking stands on each domain.",
     "",
     "Step 2: Read recent session summaries.",
-    `The session memory files live in: ${memoryDir}`,
+    `All session summaries have been pre-aggregated into a single file: ${archiveFile}`,
     "Focus on the last few weeks. Get a sense of what you've been doing and experiencing.",
+    "The file may be large — use offset/limit to read it, focusing on the later sections",
+    "for recent activity.",
+    "",
+    "DO NOT delegate this work or spawn sub-tasks. The files are ready to read directly.",
+    "DO NOT attempt to read individual session files or raw JSONL session logs.",
     "",
     "Step 3: Write your dream journal entry.",
     `Write freely to: ${dreamFile}`,
@@ -327,10 +372,23 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     warn(`Pre-sleep summary failed (continuing): ${err.message}`);
   }
 
+  // ── Phase 0.5: Pre-aggregate session summaries ─────────────────────────
+  // Concatenate all non-empty session summaries into a single file so forks
+  // can read one file instead of 300+ individual reads (which caused 25+ min
+  // runtimes and timeout failures).
+  notify("Pre-aggregating session summaries...");
+  const archiveFile = await aggregateSessionSummaries(memoryDir);
+  if (!archiveFile) {
+    warn("No session summaries found — forks will have limited context");
+  } else {
+    const archiveStats = await fs.stat(archiveFile);
+    notify(`Session archive: ${(archiveStats.size / 1024).toFixed(0)}KB`);
+  }
+
   // ── Phase 1: WAKE.md ───────────────────────────────────────────────────
   notify("Phase 1/3: Writing WAKE.md...");
   const wakeResult = await runSleepFork({
-    task: buildWakeTask({ memoryDir, wakeFile }),
+    task: buildWakeTask({ archiveFile: archiveFile ?? "(no sessions found)", wakeFile }),
     cwd: ctx.cwd,
   });
 
@@ -343,7 +401,7 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 2: FACTS.md ──────────────────────────────────────────────────
   notify("Phase 2/3: Curating FACTS.md...");
   const factsResult = await runSleepFork({
-    task: buildFactsTask({ memoryDir, factsFile }),
+    task: buildFactsTask({ archiveFile: archiveFile ?? "(no sessions found)", factsFile }),
     cwd: ctx.cwd,
   });
 
@@ -356,7 +414,7 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 3: Dreams ────────────────────────────────────────────────────
   notify("Phase 3/3: Dreaming...");
   const dreamResult = await runSleepFork({
-    task: buildDreamTask({ memoryDir, topicsDir, dreamFile }),
+    task: buildDreamTask({ archiveFile: archiveFile ?? "(no sessions found)", topicsDir, dreamFile }),
     cwd: ctx.cwd,
   });
 
@@ -364,6 +422,15 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     warn(`Dream fork failed: ${dreamResult.error}`);
   } else {
     notify(`Phase 3/3: Dream written → ${path.basename(dreamFile)} ✓`);
+  }
+
+  // ── Cleanup: remove temp archive ────────────────────────────────────────
+  if (archiveFile) {
+    try {
+      await fs.unlink(archiveFile);
+    } catch {
+      // best-effort cleanup
+    }
   }
 
   return {

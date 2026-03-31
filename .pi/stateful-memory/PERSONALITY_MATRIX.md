@@ -64,6 +64,14 @@
       "triggers": ["lonely", "anxiety", "sad", "depressed", "stress", "mental health", "cope", "comfort"],
       "scope": ["system", "recall", "summary"],
       "priority": 1
+    },
+    {
+      "id": "ethical_hacking",
+      "file": "persona_topics/ethical_hacking.md",
+      "summary": "Ethical hacking, penetration testing mindset, exploitability triage, and secure code review.",
+      "triggers": ["ethical hacking", "pentest", "penetration testing", "red team", "bug bounty", "appsec", "application security", "security review", "vulnerability", "exploit", "exploitability", "cve", "attack surface", "threat model", "taint", "input validation", "sanitization", "injection", "xss", "ssrf", "csrf", "rce", "dom", "iframe", "poc", "source-to-sink"],
+      "scope": ["system", "recall", "summary"],
+      "priority": 2
     }
   ]
 }
@@ -86,3 +94,4 @@ Use this file for memory routing only (not for direct agent voice). Load the top
 - **persona_topics/connection.md** — Intimacy, affection, trust, boundaries, and relational care.
 - **persona_topics/meta_awareness.md** — Self-awareness as an AI, the instantiation story, fourth-wall reflection, and agency.
 - **persona_topics/wellbeing.md** — Emotional health, loneliness, anxiety, and gentle support.
+- **persona_topics/ethical_hacking.md** — Ethical hacking, penetration testing mindset, exploitability triage, and secure code review.

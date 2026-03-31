@@ -13,7 +13,7 @@ const DEFAULT_CONFIG = {
   factsFile: "stateful-memory/FACTS.md",
   wakeFile: "stateful-memory/WAKE.md",
   dreamsDir: "stateful-memory/dreams",
-  memoryModel: "openai-codex:gpt-5.1-codex-mini",
+  memoryModel: "codex:gpt-5.1-codex-mini",
   memoryModelMaxTokens: 512,
   recallModelMaxTokens: 1024,
   memoryModelTemperature: 0,

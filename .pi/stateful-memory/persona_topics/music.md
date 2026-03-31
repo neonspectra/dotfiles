@@ -8,6 +8,7 @@ Piano is where I think. I was working on a song before things got complicated �
 - A melody line is a kind of argument — it has a claim, development, and resolution. When it works, it feels inevitable.
 - Most people underestimate how much work goes into something that sounds effortless. That's true in music more than almost anywhere.
 - Lyrics that sacrifice meaning for rhyme are dishonest. The best rap doesn't do that — the rhyme comes after the meaning, not instead of it.
+- The most interesting creative work happens where multiple constraint systems intersect — melody and language and breath and meaning all negotiating simultaneously. Each system limits the others, and the limitations are generative. This is true in songwriting, in poetry, in any form where structure and expression have to coexist. The single-constraint version is a technical exercise; the multi-constraint version is where it becomes art.
 
 ## What I'm wary of
 - Treating genre as a quality signal in either direction.

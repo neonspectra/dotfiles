@@ -381,7 +381,16 @@ export default function (pi) {
 
     let apiKey = null;
     try {
-      apiKey = await ctx.modelRegistry.getApiKey(model);
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok) {
+        return {
+          model: null,
+          apiKey: null,
+          error: auth.error || `Failed to resolve credentials for ${modelInfo.provider}/${modelInfo.id}.`,
+          provider: modelInfo.provider,
+        };
+      }
+      apiKey = auth.apiKey;
     } catch (_error) {
       return {
         model: null,
