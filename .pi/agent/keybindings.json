@@ -1,4 +1,10 @@
 {
-  "pageUp": ["pageUp", "ctrl+shift+up"],
-  "pageDown": ["pageDown", "ctrl+shift+down"]
+  "tui.editor.pageUp": [
+    "pageUp",
+    "ctrl+shift+up"
+  ],
+  "tui.editor.pageDown": [
+    "pageDown",
+    "ctrl+shift+down"
+  ]
 }

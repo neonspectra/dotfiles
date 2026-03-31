@@ -1,6 +1,6 @@
 {
-  "lastChangelogVersion": "0.58.3",
-  "defaultProvider": "anthropic",
+  "lastChangelogVersion": "0.64.0",
+  "defaultProvider": "claude",
   "defaultModel": "claude-opus-4-6",
   "defaultThinkingLevel": "medium",
   "packages": [
@@ -8,5 +8,23 @@
   ],
   "compaction": {
     "enabled": false
-  }
+  },
+  "enabledModels": [
+    "claude/claude-haiku-4-5",
+    "claude/claude-sonnet-4-6",
+    "claude/claude-sonnet-4-6 [1m]",
+    "claude/claude-opus-4-6",
+    "claude/claude-opus-4-6 [1m]",
+    "codex/gpt-5.4",
+    "codex/gpt-5.3-codex",
+    "codex/gpt-5.3-codex-spark",
+    "codex/gpt-5.2-codex",
+    "codex/gpt-5.1-codex-max",
+    "codex/gpt-5.2",
+    "codex/gpt-5.1-codex-mini",
+    "kimi/k2p5",
+    "kimi/kimi-k2-thinking",
+    "minimax/MiniMax-M2.7",
+    "minimax/MiniMax-M2.7-highspeed"
+  ]
 }

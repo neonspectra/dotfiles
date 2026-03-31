@@ -13,6 +13,7 @@ export default function piSelf(pi: ExtensionAPI) {
     name: "pi_run",
     label: "Pi Run",
     description: "Run a Pi CLI command as a subprocess (for tests or automation).",
+    promptSnippet: "Run a Pi CLI command as a subprocess (for tests or automation).",
     parameters: Type.Object({
       args: Type.Array(
         Type.String({ description: "Arguments passed to the pi CLI." })
