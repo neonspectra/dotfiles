@@ -533,7 +533,15 @@ export default function (pi) {
       }
     }
 
-    await fs.rename(oldPath, newPath);
+    try {
+      await fs.rename(oldPath, newPath);
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        // Source file already renamed or never created — nothing to move.
+        return;
+      }
+      throw err;
+    }
     store.setMemoryFile(newName);
     topicLocked = true;
     pi.appendEntry(STATE_ENTRY, { memoryFile: newName, topicLocked: true });
