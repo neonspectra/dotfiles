@@ -249,7 +249,11 @@ async function createForkSession(cwd: string) {
     authStorage,
     existsSync(modelsPath) ? modelsPath : undefined
   );
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+  // Use disk-backed settings so the fork inherits the saved default model/provider.
+  // SettingsManager.inMemory() loses the defaultProvider/defaultModel from settings.json,
+  // causing the fork to pick the wrong provider (e.g. built-in 'anthropic' instead of
+  // custom 'claude' proxy). Compaction is already disabled in settings.json.
+  const settingsManager = SettingsManager.create(cwd, AGENT_DIR);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir: AGENT_DIR,
@@ -266,6 +270,25 @@ async function createForkSession(cwd: string) {
     sessionManager,
     settingsManager,
   });
+
+  // Pi 0.64.0+ requires explicit bindExtensions() to load extensions, register
+  // extension tools, and build the full system prompt. Without this call, the fork
+  // session has no tools from extensions and an incomplete prompt — causing it to
+  // produce no useful output.
+  await session.bindExtensions({
+    commandContextActions: {
+      waitForIdle: () => session.agent.waitForIdle(),
+      newSession: async () => ({ cancelled: true }),
+      fork: async () => ({ cancelled: true }),
+      navigateTree: async () => ({ cancelled: true }),
+      switchSession: async () => ({ cancelled: true }),
+      reload: async () => { await session.reload(); },
+    },
+    onError: (err) => {
+      console.warn(`[delegate] Fork extension error (${err.extensionPath}): ${err.error}`);
+    },
+  });
+
   return session;
 }
 
