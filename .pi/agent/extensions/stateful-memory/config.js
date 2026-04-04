@@ -2,7 +2,10 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const DEFAULT_BASE_DIR = path.join(os.homedir(), ".pi");
+
 const DEFAULT_CONFIG = {
+  baseDir: DEFAULT_BASE_DIR,
   memoryDir: "stateful-memory/memory/sessions",
   personaFile: "stateful-memory/SOUL.md",
   auxiliaryPersonaFiles: [
@@ -54,39 +57,21 @@ function resolveRelative(value, baseDir) {
   return path.isAbsolute(value) ? value : path.resolve(baseDir, value);
 }
 
-function resolveConfigPaths({ config, envConfig, fileConfig, globalConfig, cwd }) {
-  const globalBaseDir = path.dirname(GLOBAL_CONFIG_PATH);
-  const localBaseDir = cwd;
+function resolveConfigPaths({ config }) {
+  // Resolve baseDir first — everything else is relative to it.
+  const baseDir = config.baseDir
+    ? (path.isAbsolute(config.baseDir) ? config.baseDir : path.resolve(config.baseDir))
+    : DEFAULT_BASE_DIR;
 
-  const resolved = { ...config };
-
-  const pickBase = (key) => {
-    if (envConfig[key] !== undefined) return localBaseDir;
-    if (Object.prototype.hasOwnProperty.call(fileConfig, key)) return localBaseDir;
-    if (Object.prototype.hasOwnProperty.call(globalConfig, key)) return globalBaseDir;
-    return localBaseDir;
-  };
+  const resolved = { ...config, baseDir };
 
   for (const key of PATH_KEYS) {
-    const baseDir = pickBase(key);
     resolved[key] = resolveRelative(resolved[key], baseDir);
   }
 
   for (const key of PATH_ARRAY_KEYS) {
-    const baseDir = pickBase(key);
     const entries = Array.isArray(resolved[key]) ? resolved[key] : [];
     resolved[key] = entries.map((entry) => resolveRelative(entry, baseDir));
-  }
-
-  if (resolved.personaFile && resolved.topicsFile && !path.isAbsolute(resolved.topicsFile)) {
-    resolved.topicsFile = path.resolve(path.dirname(resolved.personaFile), resolved.topicsFile);
-  }
-
-  if (resolved.personaFile && Array.isArray(resolved.auxiliaryPersonaFiles)) {
-    resolved.auxiliaryPersonaFiles = resolved.auxiliaryPersonaFiles.map((entry) => {
-      if (!entry || path.isAbsolute(entry)) return entry;
-      return path.resolve(path.dirname(resolved.personaFile), entry);
-    });
   }
 
   return resolved;
@@ -140,13 +125,7 @@ export async function loadConfig(cwd) {
     ),
   };
 
-  return resolveConfigPaths({
-    config: merged,
-    envConfig,
-    fileConfig,
-    globalConfig,
-    cwd,
-  });
+  return resolveConfigPaths({ config: merged });
 }
 
 export function resolvePath(cwd, targetPath) {
