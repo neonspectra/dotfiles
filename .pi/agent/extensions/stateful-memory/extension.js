@@ -3,7 +3,7 @@ import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
-import { loadConfig, resolvePath } from "./config.js";
+import { loadConfig } from "./config.js";
 import { MemoryStore, slugifyKeywords, slugifyTopic } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
@@ -54,15 +54,12 @@ export default function (pi) {
     }
 
     if (!store) {
-      const memoryDir = resolvePath(cwd, config.memoryDir);
       store = new MemoryStore({
-        memoryDir,
-        personaFile: resolvePath(cwd, config.personaFile),
-        auxiliaryPersonaFiles: (config.auxiliaryPersonaFiles ?? []).map((f) =>
-          resolvePath(cwd, f)
-        ),
-        factsFile: resolvePath(cwd, config.factsFile),
-        wakeFile: resolvePath(cwd, config.wakeFile),
+        memoryDir: config.memoryDir,
+        personaFile: config.personaFile,
+        auxiliaryPersonaFiles: config.auxiliaryPersonaFiles ?? [],
+        factsFile: config.factsFile,
+        wakeFile: config.wakeFile,
       });
     }
   }
