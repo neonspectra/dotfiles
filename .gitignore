@@ -15,6 +15,9 @@
 !.bash_profile
 !.bashrc
 
+# tmux
+!.tmux.conf
+
 # ssh
 !.ssh/
 .ssh/*

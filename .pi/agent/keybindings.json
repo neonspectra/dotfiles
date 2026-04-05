@@ -6,5 +6,9 @@
   "tui.editor.pageDown": [
     "pageDown",
     "ctrl+shift+down"
+  ],
+  "tui.input.newLine": [
+    "shift+enter",
+    "ctrl+j"
   ]
 }
