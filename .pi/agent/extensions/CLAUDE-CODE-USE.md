@@ -126,27 +126,31 @@ The `browser` tool deserves special note: it's registered by the npm package `pi
 
 ---
 
-## The Execute Delegation Shim (Known Bug)
+## The Execute Delegation Shim
 
-When registering an MCP alias, the extension uses a shim function:
+When registering an MCP alias, the extension uses a shim that must delegate to the original flat-named tool's `execute`. The plan uses `TOOL_EXECUTES` (a `Map<flatName, executeFn>`):
 
 ```typescript
 async execute(toolCallId, params, signal, onUpdate, ctx) {
-    const origFlat = [...FLAT_TO_MCP.entries()].find(([, mcp]) => lower(mcp) === lower(mcpAlias))?.[0];
-    const orig = origFlat ? FLAT_TOOL_DEFS.get(origFlat) : undefined;
-    if (!orig?.execute) return { content: [{ type: "text", text: `Tool ${mcpAlias} not executable` }], isError: true };
-    return orig.execute(toolCallId, params, signal, onUpdate, ctx);
+    const executeFn = TOOL_EXECUTES.get(flatKey); // flatKey = flat tool name
+    if (!executeFn) return { isError: true, content: [{ type: "text", text: "has no execute function cached" }] };
+    return executeFn(toolCallId, params, signal, onUpdate, ctx);
 }
 ```
 
-**Current issue:** In practice, the model calls the MCP alias (`mcp__stateful-memory__remember`) and the shim returns `"Tool mcp__stateful-memory__remember not executable"`. The shim can't find the original `remember` tool in `FLAT_TOOL_DEFS` at execution time.
+**Why `TOOL_EXECUTES` is needed:** `ToolInfo` (returned by `getAllTools()`) intentionally omits `execute`. The type is `Pick<ToolDefinition, "name" | "description" | "parameters"> & { sourceInfo }`. The original approach of reading `originalTool.execute` from `FLAT_TOOL_DEFS` always returns `undefined`.
 
-**Root cause is not yet identified.** Possible causes:
-1. `FLAT_TOOL_DEFS` is populated in `registerAliasesForAllTools` but the lookup in the execute shim uses `FLAT_TO_MCP` which is also populated in the same function — so the lookup should work if both maps are populated correctly
-2. The session-level state (`registeredMcpAliases`, `FLAT_TOOL_DEFS`, `FLAT_TO_MCP`) might not be accessible from the execute shim closure at call time
-3. The delegation might need a different approach (e.g., storing the original tool reference directly in the closure rather than looking it up from the map)
+**How `TOOL_EXECUTES` gets populated:**
+1. `pi.registerTool` is monkey-patched in the factory function to capture `execute` at tool registration time
+2. `captureExecuteFromRunner()` is called on first `getAllTools()` to retroactively find execute via `ExtensionRunner.getToolDefinition` — currently the runner is not accessible, so this returns `undefined`
 
-This needs debugging in a future session.
+**Current limitation:** `ExtensionRunner.getToolDefinition(name)` is NOT exposed on `ExtensionAPI`. The `ExtensionRunner` instance is not accessible from extensions (`pi._runner`, `pi.runner`, `pi._extRunner` all return `undefined`). This means `captureExecuteFromRunner()` cannot retrieve execute functions for tools registered before the `registerTool` patch.
+
+The monkey-patch on `registerTool` catches tools registered after the factory function runs (including those in `session_start` handlers), but handler execution order is uncertain — if stateful-memory's `session_start` fires before our handler, the flat tools are registered before our patch is in place.
+
+**Key architectural fact:** `ExtensionRunner` holds the canonical tool registry including execute functions, but this is not accessible from extensions. A new `ExtensionAPI.getToolExecute(toolName)` method would cleanly resolve this.
+
+See `HANDOFF.md` for full analysis and alternative approaches.
 
 ---
 
@@ -167,7 +171,7 @@ Tools registered: `list_topics`, `load_topic`, `remember`, `remember_session`, `
 
 These are registered asynchronously in `session_start`. No `sourceInfo` is attached, so `KNOWN_TOOLS` fallback is required for alias derivation.
 
-**Critical:** `FLAT_TOOL_DEFS` must have the original `remember` tool registered so the execute shim can delegate. This is currently broken — see "Execute Delegation Shim (Known Bug)" above.
+**Critical:** `FLAT_TOOL_DEFS` must have the original `remember` tool registered so the execute shim can delegate. See "Execute Delegation Shim" above for current status.
 
 ### delegate
 
@@ -237,16 +241,16 @@ When pulling updates from https://github.com/ben-vargas/pi-packages:
 
 ## Current Known Issues
 
-### Execute delegation fails
-The MCP alias shim can't find the original `remember` tool at execution time. Model calls `mcp__stateful-memory__remember`, shim returns "not executable". Needs debugging.
+### Execute delegation partially broken
+The MCP alias shim uses `TOOL_EXECUTES.get(flatKey)` but `captureExecuteFromRunner()` cannot reach `ExtensionRunner.getToolDefinition` (not exposed on `ExtensionAPI`). The `registerTool` monkey-patch catches MCP alias registrations, but flat tools registered in `session_start` handlers may not be caught depending on handler execution order.
 
-**Workaround:** Set `PI_CLAUDE_CODE_USE_DISABLE_TOOL_FILTER=1` to disable the filter and let flat tool names through. This works (MiniMax and direct pool both succeed with flat names), but loses the benefit of MCP alias translation for Anthropic OAuth.
+**Workaround:** `PI_CLAUDE_CODE_USE_DISABLE_TOOL_FILTER=1` lets flat tool names through — works for pool proxy (MiniMax) but not for Anthropic OAuth.
 
 ### Available tools section rewrite untested
 `rewriteAvailableToolsSection()` has not been confirmed to fire correctly in the actual API payload. The system prompt for the `claude` provider may use an array format with multiple blocks rather than a single string, and the rewrite logic only handles string prompts. This may need adjustment.
 
-### `find` and `ls` have no MCP alias
-These tools don't appear in `KNOWN_TOOLS` and don't have `sourceInfo` (they're registered by the SSH extension as wrappers around core tools, but the flat names `find` and `ls` aren't on `CORE_TOOL_NAMES`). They get skipped by `deriveMcpAlias`. They are currently filtered out in the after payload. This hasn't caused a visible problem but is worth noting.
+### `find` and `ls` skipped by deriveMcpAlias
+These tools don't appear in `KNOWN_TOOLS` and don't have `sourceInfo` (registered by the SSH extension as wrappers around core tools, but the flat names `find` and `ls` aren't on `CORE_TOOL_NAMES`). They get skipped by `deriveMcpAlias`. They are currently filtered out in the after payload. This hasn't caused a visible problem but is worth noting.
 
-### No `tool_choice` remapping test
-The `remapToolChoice()` function hasn't been tested with actual `tool_choice` in the payload. Logic is copied from upstream.
+### FLAT_TO_MCP is now append-only
+Fixed: `FLAT_TO_MCP` is no longer cleared between turns. Previously, clearing it on turn 2 caused the shim's reverse lookup to fail. Now it accumulates flat→mcp mappings across the session, which is safe since it's keyed by flat name.
