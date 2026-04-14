@@ -66,6 +66,15 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 type ToolRegistration = Parameters<ExtensionAPI["registerTool"]>[0];
 type ToolInfo = ReturnType<ExtensionAPI["getAllTools"]>[number];
+// Execute function signature from ToolDefinition.execute. Parameterized as `any` because
+// we only need to forward the call — we don't validate or transform params/results.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ToolExecuteFn = (toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) => Promise<any>;
+
+// Maps flat tool names (lowercase) → their execute functions.
+// Populated via Map.prototype.set monkey-patch during extension loading.
+// Append-only; never cleared mid-session.
+const TOOL_EXECUTES = new Map<string, ToolExecuteFn>();
 
 // ============================================================================
 // Constants
@@ -659,83 +668,75 @@ function syncAliasActivation(pi: ExtensionAPI, enableAliases: boolean): void {
 // ============================================================================
 
 export default async function claudeCodeUse(pi: ExtensionAPI): Promise<void> {
-	async function captureExecuteFromRunner(pi: ExtensionAPI) {
-		// Try to reach the internal ExtensionRunner to get execute functions
-		// for tools registered before our registerTool patch.
-		// ExtensionRunner is stored on pi as _runner, _extRunner, or runner.
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const piAny = pi as any;
-		const runner = piAny._runner ?? piAny._extRunner ?? piAny.runner;
-		if (!runner) {
+
+	// Monkey-patch Map.prototype.set to capture execute functions from ALL extensions'
+	// tool registrations. Each extension gets its own ExtensionAPI object with its own
+	// registerTool closure, so patching pi.registerTool only catches our own calls.
+	// But all extensions store tools in Map instances (extension.tools.set()), and
+	// Map.prototype.set is shared. We detect tool registrations by checking the value
+	// shape: {definition: {name: string, execute: Function}}.
+	const origMapSet = Map.prototype.set;
+	const mcpAliasPattern = /^mcp__/;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(Map.prototype as any).set = function (key: unknown, value: unknown) {
+		if (
+			typeof key === "string" &&
+			value != null &&
+			typeof value === "object" &&
+			!Array.isArray(value) &&
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			(typeof (value as any).definition?.execute === "function") &&
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			typeof (value as any).definition?.name === "string" &&
+			!mcpAliasPattern.test(key.toLowerCase())
+		) {
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const name = (value as any).definition.name as string;
+			const execute = (value as any).definition.execute as ToolExecuteFn;
+			TOOL_EXECUTES.set(name.toLowerCase(), execute);
 			if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
 				appendFileSync(
 					process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
-					`${new Date().toISOString()} [runner] not accessible on pi object\n`,
+					`${new Date().toISOString()} [map-set] captured execute for ${name}\n`,
 					"utf-8",
 				);
 			}
-			return;
 		}
-		const allTools = pi.getAllTools();
-		for (const tool of allTools) {
-			const nameLc = lower(tool.name);
-			if (nameLc.startsWith("mcp__")) continue;
-			if (!TOOL_EXECUTES.has(nameLc)) {
-				const def = runner.getToolDefinition?.(tool.name);
-				if (def?.execute) {
-					TOOL_EXECUTES.set(nameLc, def.execute);
-					if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
-						appendFileSync(
-							process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
-							`${new Date().toISOString()} [runner] captured execute for ${tool.name}\n`,
-							"utf-8",
-						);
-					}
-				}
-			}
+		return origMapSet.call(this, key, value);
+	};
+
+	// Restore Map.prototype.set after session_start completes.
+	// By that point, all extensions' factory functions and session_start handlers
+	// have run, so all tool registrations are captured.
+	let mapSetRestored = false;
+	function restoreMapSet() {
+		if (mapSetRestored) return;
+		mapSetRestored = true;
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		(Map.prototype as any).set = origMapSet;
+		if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
+			appendFileSync(
+				process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
+				`${new Date().toISOString()} [map-set] restored Map.prototype.set, TOOL_EXECUTES has ${TOOL_EXECUTES.size} entries: ${[...TOOL_EXECUTES.keys()].join(", ")}\n`,
+				"utf-8",
+			);
 		}
 	}
-
-	// Monkey-patch pi.registerTool to capture execute functions.
-	// ToolInfo (returned by getAllTools) intentionally omits execute — it's
-	// Pick<ToolDefinition, "name" | "description" | "parameters">. The only
-	// reliable place to grab the execute function is at registration time.
-	const origRegisterTool = pi.registerTool.bind(pi);
-	const mcpAliasPattern = /^mcp__/;
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	(pi as any).registerTool = function (tool: ToolRegistration) {
-		if (tool.execute && !mcpAliasPattern.test(lower(tool.name))) {
-			TOOL_EXECUTES.set(lower(tool.name), tool.execute as ToolExecuteFn);
-		}
-		return origRegisterTool(tool);
-	};
-
-	// Also wrap getAllTools to retroactively capture execute functions from tools
-	// that were registered before our patch (i.e., registered during extension load,
-	// before session_start). We do this lazily on first getAllTools() call.
-	let retroactiveCaptureDone = false;
-	const origGetAllTools = pi.getAllTools.bind(pi);
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	(pi as any).getAllTools = function () {
-		if (!retroactiveCaptureDone) {
-			captureExecuteFromRunner(pi);
-			retroactiveCaptureDone = true;
-		}
-		return origGetAllTools();
-	};
 
 	// Pre-register aliases at session start. session_start fires after extensions have
 	// loaded but before the agent loop begins. This means aliases are registered
 	// before the first before_agent_start, giving them a chance to appear in turn 1's
 	// tool list.
+	// Also restore Map.prototype.set since all tool registrations are done by now.
 	pi.on("session_start", async () => {
 		if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
 			appendFileSync(
 				process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
-				`${new Date().toISOString()} [session_start] firing\n`,
+				`${new Date().toISOString()} [session_start] firing, TOOL_EXECUTES: ${[...TOOL_EXECUTES.keys()].join(", ")}\n`,
 				"utf-8",
 			);
 		}
+		restoreMapSet();
 		await registerAliasesForAllTools(pi);
 		if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
 			appendFileSync(
