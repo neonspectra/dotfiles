@@ -487,15 +487,16 @@ const registeredMcpAliases = new Set<string>();
 const autoActivatedAliases = new Set<string>();
 let lastManagedToolList: string[] | undefined;
 
-const FLAT_TO_MCP = new Map<string, string>(); // flat → mcp (populated dynamically)
-const FLAT_TOOL_DEFS = new Map<string, ToolInfo>(); // flat name → original tool definition (for execute delegation)
+const FLAT_TO_MCP = new Map<string, string>(); // flat → mcp (append-only, never cleared mid-session)
+const FLAT_TOOL_DEFS = new Map<string, ToolInfo>(); // flat name → original tool definition (cleared/rebuilt each turn)
 
 async function registerAliasesForAllTools(pi: ExtensionAPI): Promise<void> {
-	FLAT_TO_MCP.clear();
-	// Reset per-turn tracking so we always re-derive FLAT_TO_MCP fresh.
-	// registeredMcpAliases persists across turns to avoid re-registering
-	// aliases that already exist in the session, but FLAT_TO_MCP must be
-	// rebuilt each turn because syncAliasActivation depends on it.
+	FLAT_TOOL_DEFS.clear();
+	// NOTE: Do NOT clear FLAT_TO_MCP. It is append-only (keyed by flat name).
+	// Clearing it mid-session causes the execute shim to lose the flat→mcp lookup
+	// when registerAliasesForAllTools runs again in the same turn after the model
+	// calls an MCP alias tool (turn 2 onward). Since FLAT_TO_MCP is keyed by flat name,
+	// not MCP alias, re-registering the same alias overwrites nothing harmful.
 
 	const allTools = pi.getAllTools();
 	const knownNames = new Set(allTools.map((t) => lower(t.name)));
@@ -513,6 +514,8 @@ async function registerAliasesForAllTools(pi: ExtensionAPI): Promise<void> {
 		const debug = (msg: string) =>
 			appendFileSync(process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!, `${new Date().toISOString()} [register] ${msg}\n`, "utf-8");
 		debug(`knownNames: ${[...knownNames].sort().join(", ")}`);
+		debug(`FLAT_TOOL_DEFS size: ${FLAT_TOOL_DEFS.size}, keys: ${[...FLAT_TOOL_DEFS.keys()].sort().join(", ")}`);
+		debug(`FLAT_TO_MCP size: ${FLAT_TO_MCP.size}, entries: ${[...FLAT_TO_MCP.entries()].map(([k, v]) => `${k}→${v}`).sort().join(", ")}`);
 	}
 
 	// Process each tool — register MCP alias for flat-named non-core non-mcp tools
@@ -553,7 +556,12 @@ async function registerAliasesForAllTools(pi: ExtensionAPI): Promise<void> {
 		if (!originalTool) continue;
 
 		// Register the MCP alias with an execute function that delegates to the original tool.
-		// We use the flat name as the key for delegation lookup.
+		// The execute function is NOT stored in FLAT_TOOL_DEFS (ToolInfo omits it intentionally).
+		// Instead, it was captured via:
+		//   1. The registerTool monkey-patch (catches tools registered after our patch)
+		//   2. captureExecuteFromRunner via getAllTools (catches tools registered before)
+		// We look it up in TOOL_EXECUTES at execution time — this is always correct
+		// since execute functions are immutable and TOOL_EXECUTES is never cleared.
 		const flatKey = flatNameLc;
 		pi.registerTool({
 			name: mcpAlias,
@@ -561,11 +569,17 @@ async function registerAliasesForAllTools(pi: ExtensionAPI): Promise<void> {
 			description: originalTool.description ?? "",
 			parameters: originalTool.parameters ?? Type.Object({}),
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
-				// Delegate to the original flat-named tool by reversing the FLAT_TO_MCP map
-				const origFlat = [...FLAT_TO_MCP.entries()].find(([, mcp]) => lower(mcp) === lower(mcpAlias))?.[0];
-				const orig = origFlat ? FLAT_TOOL_DEFS.get(origFlat) : undefined;
-				if (!orig?.execute) return { content: [{ type: "text", text: `Tool ${mcpAlias} not executable` }], isError: true };
-				return orig.execute(toolCallId, params, signal, onUpdate, ctx);
+				if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
+					appendFileSync(
+						process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
+						`${new Date().toISOString()} [execute] ${mcpAlias} called — flatKey=${flatKey} hasExecute=${TOOL_EXECUTES.has(flatKey)}\n`,
+					);
+				}
+				const executeFn = TOOL_EXECUTES.get(flatKey);
+				if (!executeFn) {
+					return { content: [{ type: "text", text: `Tool ${mcpAlias} has no execute function cached` }], isError: true };
+				}
+				return executeFn(toolCallId, params, signal, onUpdate, ctx);
 			},
 		});
 
@@ -645,6 +659,71 @@ function syncAliasActivation(pi: ExtensionAPI, enableAliases: boolean): void {
 // ============================================================================
 
 export default async function claudeCodeUse(pi: ExtensionAPI): Promise<void> {
+	async function captureExecuteFromRunner(pi: ExtensionAPI) {
+		// Try to reach the internal ExtensionRunner to get execute functions
+		// for tools registered before our registerTool patch.
+		// ExtensionRunner is stored on pi as _runner, _extRunner, or runner.
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const piAny = pi as any;
+		const runner = piAny._runner ?? piAny._extRunner ?? piAny.runner;
+		if (!runner) {
+			if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
+				appendFileSync(
+					process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
+					`${new Date().toISOString()} [runner] not accessible on pi object\n`,
+					"utf-8",
+				);
+			}
+			return;
+		}
+		const allTools = pi.getAllTools();
+		for (const tool of allTools) {
+			const nameLc = lower(tool.name);
+			if (nameLc.startsWith("mcp__")) continue;
+			if (!TOOL_EXECUTES.has(nameLc)) {
+				const def = runner.getToolDefinition?.(tool.name);
+				if (def?.execute) {
+					TOOL_EXECUTES.set(nameLc, def.execute);
+					if (process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG) {
+						appendFileSync(
+							process.env.PI_CLAUDE_CODE_USE_DEBUG_LOG!,
+							`${new Date().toISOString()} [runner] captured execute for ${tool.name}\n`,
+							"utf-8",
+						);
+					}
+				}
+			}
+		}
+	}
+
+	// Monkey-patch pi.registerTool to capture execute functions.
+	// ToolInfo (returned by getAllTools) intentionally omits execute — it's
+	// Pick<ToolDefinition, "name" | "description" | "parameters">. The only
+	// reliable place to grab the execute function is at registration time.
+	const origRegisterTool = pi.registerTool.bind(pi);
+	const mcpAliasPattern = /^mcp__/;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(pi as any).registerTool = function (tool: ToolRegistration) {
+		if (tool.execute && !mcpAliasPattern.test(lower(tool.name))) {
+			TOOL_EXECUTES.set(lower(tool.name), tool.execute as ToolExecuteFn);
+		}
+		return origRegisterTool(tool);
+	};
+
+	// Also wrap getAllTools to retroactively capture execute functions from tools
+	// that were registered before our patch (i.e., registered during extension load,
+	// before session_start). We do this lazily on first getAllTools() call.
+	let retroactiveCaptureDone = false;
+	const origGetAllTools = pi.getAllTools.bind(pi);
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(pi as any).getAllTools = function () {
+		if (!retroactiveCaptureDone) {
+			captureExecuteFromRunner(pi);
+			retroactiveCaptureDone = true;
+		}
+		return origGetAllTools();
+	};
+
 	// Pre-register aliases at session start. session_start fires after extensions have
 	// loaded but before the agent loop begins. This means aliases are registered
 	// before the first before_agent_start, giving them a chance to appear in turn 1's
