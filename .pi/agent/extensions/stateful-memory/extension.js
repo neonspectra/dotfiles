@@ -613,20 +613,19 @@ export default function (pi) {
     });
   }
 
-  pi.on("session_start", async (_event, ctx) => {
-    await ensureSessionState(ctx);
-    if (ctx.hasUI) {
-      ctx.ui.setStatus("stateful-memory", "Memory: ready");
+  // pi 0.65.0+ unified session_start + session_switch into a single event
+  // that fires for all session transitions (startup/reload/new/resume/fork).
+  // Reset per-session caches on any non-startup transition so we don't carry
+  // state from the outgoing session.
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason && event.reason !== "startup") {
+      sessionInitialized = false;
+      lastSessionPath = null;
+      pendingResumeSessionPath = null;
+      pendingSessionInit = false;
+      topicLocked = false;
+      activeTopics = new Map();
     }
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    sessionInitialized = false;
-    lastSessionPath = null;
-    pendingResumeSessionPath = null;
-    pendingSessionInit = false;
-    topicLocked = false;
-    activeTopics = new Map();
     await ensureSessionState(ctx);
     if (ctx.hasUI) {
       ctx.ui.setStatus("stateful-memory", "Memory: ready");

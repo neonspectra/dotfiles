@@ -245,7 +245,7 @@ function extractSummary(fullText: string, lastTurnText: string): string {
 async function createForkSession(cwd: string) {
   const authStorage = AuthStorage.create(join(AGENT_DIR, "auth.json"));
   const modelsPath = join(AGENT_DIR, "models.json");
-  const modelRegistry = new ModelRegistry(
+  const modelRegistry = ModelRegistry.create(
     authStorage,
     existsSync(modelsPath) ? modelsPath : undefined
   );

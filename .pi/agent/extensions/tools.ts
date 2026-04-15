@@ -139,8 +139,11 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		restoreFromBranch(ctx);
 	});
 
-	// Restore state after forking
-	pi.on("session_fork", async (_event, ctx) => {
-		restoreFromBranch(ctx);
+	// Restore state after forking. pi 0.65.0+ folded session_fork into
+	// session_start with event.reason === "fork".
+	pi.on("session_start", async (event, ctx) => {
+		if (event.reason === "fork") {
+			restoreFromBranch(ctx);
+		}
 	});
 }
