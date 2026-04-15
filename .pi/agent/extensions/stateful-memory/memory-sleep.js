@@ -105,7 +105,7 @@ function loadSharedInfra(cwd) {
 
   const authStorage = AuthStorage.create(join(AGENT_DIR, "auth.json"));
   const modelsPath = join(AGENT_DIR, "models.json");
-  const modelRegistry = new ModelRegistry(
+  const modelRegistry = ModelRegistry.create(
     authStorage,
     existsSync(modelsPath) ? modelsPath : undefined
   );

@@ -44,11 +44,9 @@ export default function forceTools(pi: ExtensionAPI) {
     pi.setActiveTools(tools);
   };
 
+  // session_start fires for startup/reload/new/resume/fork (pi 0.65.0+),
+  // so a single handler covers what used to be session_start + session_switch.
   pi.on("session_start", async () => {
-    enable();
-  });
-
-  pi.on("session_switch", async () => {
     enable();
   });
 }
