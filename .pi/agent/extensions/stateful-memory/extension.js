@@ -427,7 +427,28 @@ export default function (pi) {
       }
     }
     await ensureSessionState(ctx);
-    if (ctx.hasUI) ctx.ui.setStatus("stateful-memory", "Memory: ready");
+
+    if (ctx.hasUI) {
+      // Probe backends async — don't block session start
+      const parts = [];
+      try {
+        await ensureTagmem();
+        const st = await tagmemClient.status();
+        parts.push(`tagmem: ${st.total_entries} entries`);
+      } catch (err) {
+        parts.push(`tagmem: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
+      }
+      try {
+        const neo = ensureNeotoma();
+        const { total } = await neo.listEntities();
+        parts.push(`neotoma: ${total} entities`);
+      } catch (err) {
+        parts.push(`neotoma: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
+      }
+      const allOk = parts.every(p => !p.includes("✗"));
+      const label = allOk ? "Memory: ready" : "Memory: degraded";
+      ctx.ui.setStatus("stateful-memory", `${label} (${parts.join(" | ")})`);
+    }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
