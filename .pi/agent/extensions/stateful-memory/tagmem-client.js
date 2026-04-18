@@ -99,6 +99,29 @@ export class TagmemClient {
   }
 
   /**
+   * Submit a session save job to the proxy. Returns immediately.
+   * The proxy handles dedup (delete old entry) and add in the background.
+   * @param {object} params
+   * @param {string} params.body — Normalized transcript
+   * @param {string} params.origin — Session path (dedup key)
+   * @param {string[]} [params.tags]
+   * @param {string} [params.title]
+   * @param {number} [params.depth]
+   * @returns {Promise<{job_id: string, queued: boolean, queue_depth: number}>}
+   */
+  async submitSave(params) {
+    return this.#request("proxy/submit_save", params);
+  }
+
+  /**
+   * Get the proxy's save queue status.
+   * @returns {Promise<{queue_depth: number, jobs: object[]}>}
+   */
+  async queueStatus() {
+    return this.#request("proxy/queue_status", {});
+  }
+
+  /**
    * Add a new entry to the tagmem store.
    * @param {object} entry
    * @param {string} entry.title

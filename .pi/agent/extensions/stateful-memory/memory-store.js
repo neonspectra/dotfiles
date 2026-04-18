@@ -156,7 +156,7 @@ export async function renderObservations(neotomaClient, outputPath) {
  * Most recent first, capped at 50 entries.
  *
  * @param {string} indexPath
- * @param {{ sessionPath: string, tagmemEntryId: number, timestamp: string, tags: string[] }} entry
+ * @param {{ sessionPath: string, timestamp: string, tags: string[] }} entry
  */
 export async function updateRecencyIndex(indexPath, entry) {
   let entries = await readRecencyIndex(indexPath);
@@ -177,7 +177,7 @@ export async function updateRecencyIndex(indexPath, entry) {
 /**
  * Read the recency index. Returns empty array if file doesn't exist.
  * @param {string} indexPath
- * @returns {Promise<Array<{ sessionPath: string, tagmemEntryId: number, timestamp: string, tags: string[] }>>}
+ * @returns {Promise<Array<{ sessionPath: string, timestamp: string, tags: string[] }>>}
  */
 export async function readRecencyIndex(indexPath) {
   try {

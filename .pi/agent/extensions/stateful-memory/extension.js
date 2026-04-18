@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
 import { loadConfig } from "./config.js";
-import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex, readRecencyIndex } from "./memory-store.js";
+import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
 // memory-summary.js removed — session transcripts written directly to tagmem
@@ -302,35 +302,21 @@ export default function (pi) {
     try {
       await ensureTagmem();
 
-      // Dedup: delete previous entry for this session
-      if (sessionPath) {
-        try {
-          const existing = await readRecencyIndex(indexPath);
-          const prev = existing.find(e => e.sessionPath === sessionPath);
-          if (prev?.tagmemEntryId) {
-            await tagmemClient.deleteEntry(prev.tagmemEntryId);
-            console.log(`[stateful-memory] Deleted previous tagmem entry ${prev.tagmemEntryId}`);
-          }
-        } catch (dedupErr) {
-          // Delete failed — continue with the add anyway.
-          // A duplicate is better than losing the session entirely.
-          console.error("[stateful-memory] Dedup delete failed (continuing):", dedupErr.message);
-        }
-      }
-
-      const entry = await tagmemClient.add({
-        depth: 2,
-        title: slugifyKeywords(transcript, 8),
+      // Submit save job to proxy — returns immediately.
+      // The proxy handles dedup (delete old entry via origin map) and add.
+      const result = await tagmemClient.submitSave({
         body: transcript,
-        tags,
+        title: slugifyKeywords(transcript, 8),
         origin: sessionPath,
+        tags,
+        depth: 2,
       });
 
-      // Update recency index
+      // Update recency index (no entry ID — proxy manages that via origin map)
       try {
+        const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
         await updateRecencyIndex(indexPath, {
           sessionPath,
-          tagmemEntryId: entry?.entry?.id ?? entry?.id ?? null,
           timestamp: new Date().toISOString(),
           tags,
         });
@@ -338,11 +324,17 @@ export default function (pi) {
         console.error("[stateful-memory] Recency index update failed:", indexErr.message);
       }
 
-      if (ctx.hasUI) ctx.ui.notify("Session transcript saved.", "info");
-      return entry;
+      if (ctx.hasUI) {
+        const depth = result?.queue_depth ?? 0;
+        const msg = depth > 0
+          ? `Session queued for save (${depth + 1} in queue).`
+          : "Session queued for save.";
+        ctx.ui.notify(msg, "info");
+      }
+      return result;
     } catch (err) {
-      console.error("[stateful-memory] Failed to save transcript to tagmem:", err.message);
-      if (ctx.hasUI) ctx.ui.notify("Session transcript failed to save.", "warning");
+      console.error("[stateful-memory] Failed to submit save:", err.message);
+      if (ctx.hasUI) ctx.ui.notify("Session save failed to submit.", "warning");
       return null;
     }
   }
