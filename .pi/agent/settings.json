@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.64.0",
+  "lastChangelogVersion": "0.67.2",
   "defaultProvider": "claude",
   "defaultModel": "claude-opus-4-6",
   "defaultThinkingLevel": "medium",
