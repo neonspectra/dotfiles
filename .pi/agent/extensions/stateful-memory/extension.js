@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
 import { loadConfig } from "./config.js";
-import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex } from "./memory-store.js";
+import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex, readRecencyIndex } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
 // memory-summary.js removed — session transcripts written directly to tagmem
@@ -271,7 +271,12 @@ export default function (pi) {
     return null;
   }
 
-  async function summarizeCurrentSession(ctx, { reason } = {}) {
+  /**
+   * Save the current session transcript to tagmem.
+   * Captures transcript synchronously, then writes to tagmem.
+   * If background=true, the tagmem write is fire-and-forget (returns immediately).
+   */
+  async function summarizeCurrentSession(ctx, { reason, background = false } = {}) {
     await ensureSessionState(ctx);
 
     const sessionPath = ctx.sessionManager.getSessionFile() ?? store.sessionPath;
@@ -290,53 +295,66 @@ export default function (pi) {
       return null;
     }
 
-    try {
-      await ensureTagmem();
+    const tags = determineSessionTags(transcript, activeTopics);
+    const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
 
-      // Dedup: remove existing entries for this session origin before writing
-      if (sessionPath) {
-        try {
-          const existing = await tagmemClient.search(sessionPath, { limit: 3, depth: 2 });
-          const matches = (existing.entries || []).filter(e => e.origin === sessionPath);
-          for (const match of matches) {
-            await tagmemClient.deleteEntry(match.id);
-            console.log(`[stateful-memory] Deleted duplicate tagmem entry ${match.id} for ${sessionPath}`);
-          }
-        } catch (dedupErr) {
-          console.error("[stateful-memory] Dedup failed (continuing):", dedupErr.message);
-        }
-      }
-
-      const tags = determineSessionTags(transcript, activeTopics);
-      const entry = await tagmemClient.add({
-        depth: 2,
-        title: slugifyKeywords(transcript, 8),
-        body: transcript,
-        tags,
-        origin: sessionPath,
-      });
-
-      if (ctx.hasUI) ctx.ui.notify("Session transcript saved.", "info");
-
-      // Update recency index
+    // The actual write operation — can be awaited or fire-and-forget
+    const doWrite = async () => {
       try {
-        const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
-        await updateRecencyIndex(indexPath, {
-          sessionPath,
-          tagmemEntryId: entry?.entry?.id ?? entry?.id ?? null,
-          timestamp: new Date().toISOString(),
-          tags,
-        });
-      } catch (indexErr) {
-        console.error("[stateful-memory] Recency index update failed:", indexErr.message);
-      }
+        await ensureTagmem();
 
-      return entry;
-    } catch (err) {
-      console.error("[stateful-memory] Failed to save transcript to tagmem:", err.message);
-      if (ctx.hasUI) ctx.ui.notify("Session transcript failed to save.", "warning");
-      return null;
+        // Dedup: look up previous entry ID from recency index and delete it
+        if (sessionPath) {
+          try {
+            const existing = await readRecencyIndex(indexPath);
+            const prev = existing.find(e => e.sessionPath === sessionPath);
+            if (prev?.tagmemEntryId) {
+              await tagmemClient.deleteEntry(prev.tagmemEntryId);
+              console.log(`[stateful-memory] Deleted previous tagmem entry ${prev.tagmemEntryId} for ${sessionPath}`);
+            }
+          } catch (dedupErr) {
+            console.error("[stateful-memory] Dedup failed (continuing):", dedupErr.message);
+          }
+        }
+
+        const entry = await tagmemClient.add({
+          depth: 2,
+          title: slugifyKeywords(transcript, 8),
+          body: transcript,
+          tags,
+          origin: sessionPath,
+        });
+
+        // Update recency index
+        try {
+          await updateRecencyIndex(indexPath, {
+            sessionPath,
+            tagmemEntryId: entry?.entry?.id ?? entry?.id ?? null,
+            timestamp: new Date().toISOString(),
+            tags,
+          });
+        } catch (indexErr) {
+          console.error("[stateful-memory] Recency index update failed:", indexErr.message);
+        }
+
+        if (ctx.hasUI) ctx.ui.notify("Session transcript saved.", "info");
+        return entry;
+      } catch (err) {
+        console.error("[stateful-memory] Failed to save transcript to tagmem:", err.message);
+        if (ctx.hasUI) ctx.ui.notify("Session transcript failed to save.", "warning");
+        return null;
+      }
+    };
+
+    if (background) {
+      // Fire and forget — don't block the session transition
+      doWrite().catch(err => {
+        console.error("[stateful-memory] Background save failed:", err.message);
+      });
+      return null; // caller doesn't wait for result
     }
+
+    return doWrite();
   }
 
   // ── Event Handlers ────────────────────────────────────────────────────
@@ -477,13 +495,17 @@ export default function (pi) {
   });
 
   pi.on("session_before_switch", async (_event, ctx) => {
-    await summarizeCurrentSession(ctx, { reason: "session-switch" });
+    if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
+    // Background save — don't block the session switch
+    await summarizeCurrentSession(ctx, { reason: "session-switch", background: true });
   });
 
   // session_before_fork handler removed — parent session gets its own
   // shutdown summary; fork sessions get their own independent lifecycle.
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
+    // Await on shutdown — last chance to save, process is about to exit
     await summarizeCurrentSession(ctx, { reason: "session-shutdown" });
   });
 

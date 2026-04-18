@@ -139,7 +139,7 @@ export class TagmemClient {
    * @returns {Promise<object>}
    */
   async deleteEntry(id) {
-    return this.#callTool("tagmem_delete_entry", { id });
+    return this.#callTool("tagmem_delete_entry", { id }, { timeoutMs: ADD_TIMEOUT_MS });
   }
 
   /**
