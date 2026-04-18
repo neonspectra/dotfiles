@@ -91,7 +91,8 @@ export class NeotomaClient {
     const env = {
       ...process.env,
       NEOTOMA_DATA_DIR: this.#dataDir,
-      NEOTOMA_ENV: "production",
+      // Data lives in neotoma.db (development), not neotoma.prod.db
+      // NEOTOMA_ENV intentionally omitted to use default (development)
     };
 
     return new Promise((resolve, reject) => {

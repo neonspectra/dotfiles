@@ -16,6 +16,7 @@ const DEFAULT_CONFIG = {
   factsFile: "stateful-memory/FACTS.md",
   wakeFile: "stateful-memory/WAKE.md",
   dreamsDir: "stateful-memory/dreams",
+  observationsFile: "stateful-memory/OBSERVATIONS.md",
   memoryModel: "codex:gpt-5.1-codex-mini",
   memoryModelMaxTokens: 512,
   recallModelMaxTokens: 1024,
@@ -49,7 +50,7 @@ async function readConfigFile(configPath) {
   }
 }
 
-const PATH_KEYS = ["memoryDir", "personaFile", "factsFile", "wakeFile", "dreamsDir", "topicsFile"];
+const PATH_KEYS = ["memoryDir", "personaFile", "factsFile", "wakeFile", "dreamsDir", "topicsFile", "observationsFile"];
 const PATH_ARRAY_KEYS = ["auxiliaryPersonaFiles"];
 
 function resolveRelative(value, baseDir) {

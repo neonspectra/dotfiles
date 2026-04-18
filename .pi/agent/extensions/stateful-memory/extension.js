@@ -4,10 +4,10 @@ import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
 import { loadConfig } from "./config.js";
-import { MemoryStore, slugifyKeywords } from "./memory-store.js";
+import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
-import { summarizeSessionWithModel } from "./memory-summary.js";
+// memory-summary.js removed — session transcripts written directly to tagmem
 import { buildMemoryInstructions, buildMemorySection } from "./memory-prompt.js";
 import {
   buildTopicAddendum,
@@ -114,6 +114,7 @@ export default function (pi) {
         auxiliaryPersonaFiles: config.auxiliaryPersonaFiles ?? [],
         factsFile: config.factsFile,
         wakeFile: config.wakeFile,
+        observationsFile: config.observationsFile,
       });
     }
   }
@@ -156,16 +157,18 @@ export default function (pi) {
   }
 
   async function buildSystemPromptAddon() {
-    const [persona, facts, wakeContext] = await Promise.all([
+    const [persona, facts, wakeContext, observations] = await Promise.all([
       store.readPersona(),
       store.readFacts(),
       store.readWakeContext(),
+      store.readObservations(),
     ]);
 
     const memorySection = buildMemorySection({
       persona,
       facts,
       wakeContext,
+      observations,
       enrichedContext: cachedMemoryContext,
       entityContext: cachedEntityContext,
     });
@@ -268,145 +271,70 @@ export default function (pi) {
     return null;
   }
 
-  function parseModelId(modelId) {
-    if (!modelId) {
-      return null;
-    }
-    const [provider, ...rest] = modelId.split(":");
-    if (!provider || rest.length === 0) {
-      return null;
-    }
-    return { provider, id: rest.join(":") };
-  }
-
-  async function resolveMemoryModel(ctx) {
-    const modelInfo = parseModelId(config.memoryModel);
-    if (!modelInfo) {
-      return {
-        model: null,
-        apiKey: null,
-        error: "Memory model not configured. Set memoryModel to provider:modelId.",
-        provider: null,
-      };
-    }
-
-    const model = ctx.modelRegistry.find(modelInfo.provider, modelInfo.id) ?? null;
-    if (!model) {
-      return {
-        model: null,
-        apiKey: null,
-        error: `Memory model not found: ${modelInfo.provider}/${modelInfo.id}.`,
-        provider: modelInfo.provider,
-      };
-    }
-
-    const available = await ctx.modelRegistry.getAvailable();
-    const isAvailable = available.some(
-      (item) => item.provider === modelInfo.provider && item.id === modelInfo.id
-    );
-
-    if (!isAvailable) {
-      return {
-        model: null,
-        apiKey: null,
-        error: `No credentials configured for ${modelInfo.provider}/${modelInfo.id}.`,
-        provider: modelInfo.provider,
-      };
-    }
-
-    let apiKey = null;
-    try {
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok) {
-        return {
-          model: null,
-          apiKey: null,
-          error: auth.error || `Failed to resolve credentials for ${modelInfo.provider}/${modelInfo.id}.`,
-          provider: modelInfo.provider,
-        };
-      }
-      apiKey = auth.apiKey;
-    } catch (_error) {
-      return {
-        model: null,
-        apiKey: null,
-        error: `Failed to resolve credentials for ${modelInfo.provider}/${modelInfo.id}.`,
-        provider: modelInfo.provider,
-      };
-    }
-
-    return { model, apiKey, error: null, provider: modelInfo.provider };
-  }
-
   async function summarizeCurrentSession(ctx, { reason } = {}) {
     await ensureSessionState(ctx);
 
-    const { model, apiKey, error } = await resolveMemoryModel(ctx);
-    if (!model) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(error ?? "Memory model unavailable.", "warning");
-      }
-      return null;
-    }
-
     const sessionPath = ctx.sessionManager.getSessionFile() ?? store.sessionPath;
+
+    // Read full normalized transcript (200KB budget covers any session)
     let transcript = "";
-    let usedJsonl = false;
     if (sessionPath) {
-      transcript = await readSessionJsonl(sessionPath, {
-        maxChars: config.sessionSummaryMaxChars,
-      });
-      usedJsonl = Boolean(transcript);
+      transcript = await readSessionJsonl(sessionPath, { maxChars: 200000 });
     }
     if (!transcript) {
       transcript = buildTranscriptFromEntries(ctx.sessionManager.getBranch(), {
-        maxChars: config.sessionSummaryMaxChars,
+        maxChars: 200000,
       });
     }
-
     if (!transcript) {
       return null;
     }
 
-    const persona = await buildPersonaWithTopics({
-      query: transcript,
-      scope: "summary",
-      maxResults: 2,
-      minScore: 2,
-      ctx,
-    });
-
-    const summary = await summarizeSessionWithModel({
-      model,
-      apiKey,
-      persona,
-      transcript,
-      explicitFacts: [],
-      maxTokens: config.memoryModelMaxTokens,
-      temperature: config.memoryModelTemperature,
-    });
-
-    if (!summary) {
-      return null;
-    }
-
-    // Write to tagmem instead of markdown file
     try {
       await ensureTagmem();
-      const tags = determineSessionTags(summary, activeTopics);
+
+      // Dedup: remove existing entries for this session origin before writing
+      if (sessionPath) {
+        try {
+          const existing = await tagmemClient.search(sessionPath, { limit: 3, depth: 2 });
+          const matches = (existing.entries || []).filter(e => e.origin === sessionPath);
+          for (const match of matches) {
+            await tagmemClient.deleteEntry(match.id);
+            console.log(`[stateful-memory] Deleted duplicate tagmem entry ${match.id} for ${sessionPath}`);
+          }
+        } catch (dedupErr) {
+          console.error("[stateful-memory] Dedup failed (continuing):", dedupErr.message);
+        }
+      }
+
+      const tags = determineSessionTags(transcript, activeTopics);
       const entry = await tagmemClient.add({
-        depth: 1,
-        title: slugifyKeywords(summary, 8),
-        body: summary,
+        depth: 2,
+        title: slugifyKeywords(transcript, 8),
+        body: transcript,
         tags,
         origin: sessionPath,
       });
 
-      if (ctx.hasUI) ctx.ui.notify("Session summary saved.", "info");
+      if (ctx.hasUI) ctx.ui.notify("Session transcript saved.", "info");
+
+      // Update recency index
+      try {
+        const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
+        await updateRecencyIndex(indexPath, {
+          sessionPath,
+          tagmemEntryId: entry?.entry?.id ?? entry?.id ?? null,
+          timestamp: new Date().toISOString(),
+          tags,
+        });
+      } catch (indexErr) {
+        console.error("[stateful-memory] Recency index update failed:", indexErr.message);
+      }
+
       return entry;
     } catch (err) {
-      console.error("[stateful-memory] Failed to save summary to tagmem:", err.message);
-      if (ctx.hasUI) ctx.ui.notify("Session summary failed to save.", "warning");
+      console.error("[stateful-memory] Failed to save transcript to tagmem:", err.message);
+      if (ctx.hasUI) ctx.ui.notify("Session transcript failed to save.", "warning");
       return null;
     }
   }
@@ -449,6 +377,14 @@ export default function (pi) {
       const label = allOk ? "Memory: ready" : "Memory: degraded";
       ctx.ui.setStatus("stateful-memory", `${label} (${parts.join(" | ")})`);
     }
+
+    // Render OBSERVATIONS.md from Neotoma on session start
+    try {
+      const neo = ensureNeotoma();
+      await renderObservations(neo, config.observationsFile);
+    } catch (err) {
+      console.error("[stateful-memory] OBSERVATIONS.md render failed:", err.message);
+    }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
@@ -481,7 +417,13 @@ export default function (pi) {
         const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
 
         cachedMemoryContext = bodies
-          .map(r => `**${r.entry.title}**\n${r.entry.body}`)
+          .map(r => {
+            const body = r.entry.body;
+            const truncated = body.length > 3000
+              ? body.slice(0, 3000) + "\n(truncated)"
+              : body;
+            return `**${r.entry.title}**\n${truncated}`;
+          })
           .join("\n\n---\n\n");
 
         // Entity snapshots for mentioned entities
@@ -538,9 +480,8 @@ export default function (pi) {
     await summarizeCurrentSession(ctx, { reason: "session-switch" });
   });
 
-  pi.on("session_before_fork", async (_event, ctx) => {
-    await summarizeCurrentSession(ctx, { reason: "session-fork" });
-  });
+  // session_before_fork handler removed — parent session gets its own
+  // shutdown summary; fork sessions get their own independent lifecycle.
 
   pi.on("session_shutdown", async (_event, ctx) => {
     await summarizeCurrentSession(ctx, { reason: "session-shutdown" });
@@ -639,13 +580,17 @@ export default function (pi) {
         "zeta directive": "TheZetaDirective",
       };
 
+      // Map tool-facing target types to Neotoma entity types
+      const NEOTOMA_TYPE_MAP = { person: "sophont" };
+      const neotomaType = NEOTOMA_TYPE_MAP[params.target] || params.target;
+
       let entityName = params.name?.trim() || DEFAULTS[params.target] || params.target;
       const normalized = entityName.toLowerCase();
       if (ALIASES[normalized]) entityName = ALIASES[normalized];
 
       try {
         await neo.storeObservations([{
-          entity_type: params.target,
+          entity_type: neotomaType,
           name: entityName,
           observations: params.items,
         }]);

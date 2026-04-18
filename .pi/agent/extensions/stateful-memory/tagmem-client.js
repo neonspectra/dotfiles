@@ -122,6 +122,27 @@ export class TagmemClient {
   }
 
   /**
+   * List entries with optional filtering. Note: may be slow with large result sets.
+   * @param {object} [opts]
+   * @param {number} [opts.depth] — Filter by depth level
+   * @param {string} [opts.tag] — Filter by tag
+   * @param {number} [opts.limit] — Max results
+   * @returns {Promise<{entries: object[]}>}
+   */
+  async list(opts = {}) {
+    return this.#callTool("tagmem_list_entries", opts);
+  }
+
+  /**
+   * Delete an entry by ID.
+   * @param {number} id — Entry ID
+   * @returns {Promise<object>}
+   */
+  async deleteEntry(id) {
+    return this.#callTool("tagmem_delete_entry", { id });
+  }
+
+  /**
    * Close the connection and reject any pending requests.
    */
   close() {
