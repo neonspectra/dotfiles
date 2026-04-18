@@ -20,6 +20,7 @@ const DEFAULT_SOCKET_PATH =
   (process.env.XDG_RUNTIME_DIR || "/run/user/1002") + "/tagmem.sock";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const ADD_TIMEOUT_MS = 60_000;
 
 export class TagmemClient {
   /** @type {string} */
@@ -109,7 +110,7 @@ export class TagmemClient {
    * @returns {Promise<{entry: object}>}
    */
   async add(entry) {
-    return this.#callTool("tagmem_add_entry", entry);
+    return this.#callTool("tagmem_add_entry", entry, { timeoutMs: ADD_TIMEOUT_MS });
   }
 
   /**
@@ -145,11 +146,11 @@ export class TagmemClient {
    * @param {object} args
    * @returns {Promise<object>}
    */
-  async #callTool(toolName, args) {
+  async #callTool(toolName, args, opts = {}) {
     const result = await this.#request("tools/call", {
       name: toolName,
       arguments: args,
-    });
+    }, opts);
 
     // Check for tool-level error
     if (result.isError) {
@@ -178,13 +179,13 @@ export class TagmemClient {
    * @param {object} params
    * @returns {Promise<object>}
    */
-  #request(method, params) {
+  #request(method, params, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     return new Promise((resolve, reject) => {
       const id = this.#nextId++;
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new Error(`tagmem request timeout (${method}, id=${id})`));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
 
       this.#pending.set(id, { resolve, reject, timer });
       this.#send({ jsonrpc: "2.0", method, id, params });
