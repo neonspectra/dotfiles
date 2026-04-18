@@ -426,15 +426,40 @@ export default function (pi) {
 
     // First-message enrichment: search tagmem + Neotoma for relevant context
     if (!sessionEnriched && event.prompt?.trim()) {
-      try {
-        await ensureTagmem();
+      if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Enriching memory...");
 
-        // Semantic search for relevant session context
-        const searchResults = await tagmemClient.search(event.prompt, { limit: 5 });
-        const topEntries = searchResults.entries?.slice(0, 3) || [];
-        const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
+      // Run tagmem search and Neotoma query in parallel with independent error handling
+      const tagmemPromise = (async () => {
+        try {
+          await ensureTagmem();
+          const searchResults = await tagmemClient.search(event.prompt, { limit: 5 });
+          const topEntries = searchResults.entries?.slice(0, 3) || [];
+          const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
+          return { entries: topEntries, bodies };
+        } catch (err) {
+          console.error("[stateful-memory] tagmem enrichment failed:", err.message);
+          return { entries: [], bodies: [] };
+        }
+      })();
 
-        cachedMemoryContext = bodies
+      const neotomaPromise = (async () => {
+        try {
+          const neo = ensureNeotoma();
+          const { entities: allEntities } = await neo.listEntities();
+          const queryLower = event.prompt.toLowerCase();
+          return (allEntities || []).filter(e =>
+            queryLower.includes(e.canonical_name.toLowerCase())
+          );
+        } catch (err) {
+          console.error("[stateful-memory] neotoma enrichment failed:", err.message);
+          return [];
+        }
+      })();
+
+      const [tagmemResult, mentioned] = await Promise.all([tagmemPromise, neotomaPromise]);
+
+      if (tagmemResult.bodies.length > 0) {
+        cachedMemoryContext = tagmemResult.bodies
           .map(r => {
             const body = r.entry.body;
             const truncated = body.length > 3000
@@ -443,35 +468,23 @@ export default function (pi) {
             return `**${r.entry.title}**\n${truncated}`;
           })
           .join("\n\n---\n\n");
+      }
 
-        // Entity snapshots for mentioned entities
-        const neo = ensureNeotoma();
-        const { entities: allEntities } = await neo.listEntities();
-        const queryLower = event.prompt.toLowerCase();
-        const mentioned = (allEntities || []).filter(e =>
-          queryLower.includes(e.canonical_name.toLowerCase())
-        );
-        if (mentioned.length > 0) {
-          cachedEntityContext = mentioned.map(e => {
-            const snap = e.snapshot ? JSON.stringify(e.snapshot, null, 2) : "(no snapshot)";
-            return `**${e.canonical_name}** (${e.entity_type}):\n${snap}`;
-          }).join("\n\n");
-        }
+      if (mentioned.length > 0) {
+        cachedEntityContext = mentioned.map(e => {
+          const snap = e.snapshot ? JSON.stringify(e.snapshot, null, 2) : "(no snapshot)";
+          return `**${e.canonical_name}** (${e.entity_type}):\n${snap}`;
+        }).join("\n\n");
+      }
 
-        sessionEnriched = true;
-        if (ctx.hasUI) {
-          const memCount = topEntries.length;
-          const entCount = mentioned.length;
-          const parts = [`${memCount} memories`];
-          if (entCount > 0) parts.push(`${entCount} ${entCount === 1 ? "entity" : "entities"}`);
-          ctx.ui.notify(`Memory enriched: ${parts.join(", ")}.`, "info");
-        }
-      } catch (err) {
-        console.error("[stateful-memory] enrichment failed:", err.message);
-        sessionEnriched = true; // don't retry on every message
-        if (ctx.hasUI) {
-          ctx.ui.notify(`Memory enrichment failed: ${err.message.split("\n")[0].slice(0, 60)}`, "warning");
-        }
+      sessionEnriched = true;
+      if (ctx.hasUI) {
+        ctx.ui.setStatus("stateful-memory-enrich", ""); // clear status
+        const memCount = tagmemResult.entries.length;
+        const entCount = mentioned.length;
+        const parts = [`${memCount} memories`];
+        if (entCount > 0) parts.push(`${entCount} ${entCount === 1 ? "entity" : "entities"}`);
+        ctx.ui.notify(`Memory enriched: ${parts.join(", ")}.`, "info");
       }
     }
 
