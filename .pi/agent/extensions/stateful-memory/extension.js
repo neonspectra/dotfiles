@@ -274,9 +274,8 @@ export default function (pi) {
   /**
    * Save the current session transcript to tagmem.
    * Captures transcript synchronously, then writes to tagmem.
-   * If background=true, the tagmem write is fire-and-forget (returns immediately).
    */
-  async function summarizeCurrentSession(ctx, { reason, background = false } = {}) {
+  async function summarizeCurrentSession(ctx, { reason } = {}) {
     await ensureSessionState(ctx);
 
     const sessionPath = ctx.sessionManager.getSessionFile() ?? store.sessionPath;
@@ -291,70 +290,64 @@ export default function (pi) {
         maxChars: 200000,
       });
     }
-    if (!transcript) {
+
+    // Skip empty or trivial sessions (less than 200 chars of content)
+    if (!transcript || transcript.length < 200) {
       return null;
     }
 
     const tags = determineSessionTags(transcript, activeTopics);
     const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
 
-    // The actual write operation — can be awaited or fire-and-forget
-    const doWrite = async () => {
-      try {
-        await ensureTagmem();
+    try {
+      await ensureTagmem();
 
-        // Dedup: look up previous entry ID from recency index and delete it
-        if (sessionPath) {
-          try {
-            const existing = await readRecencyIndex(indexPath);
-            const prev = existing.find(e => e.sessionPath === sessionPath);
-            if (prev?.tagmemEntryId) {
-              await tagmemClient.deleteEntry(prev.tagmemEntryId);
-              console.log(`[stateful-memory] Deleted previous tagmem entry ${prev.tagmemEntryId} for ${sessionPath}`);
-            }
-          } catch (dedupErr) {
-            console.error("[stateful-memory] Dedup failed (continuing):", dedupErr.message);
-          }
-        }
-
-        const entry = await tagmemClient.add({
-          depth: 2,
-          title: slugifyKeywords(transcript, 8),
-          body: transcript,
-          tags,
-          origin: sessionPath,
-        });
-
-        // Update recency index
+      // Dedup: delete previous entry for this session, but don't let failure block the write
+      if (sessionPath) {
         try {
-          await updateRecencyIndex(indexPath, {
-            sessionPath,
-            tagmemEntryId: entry?.entry?.id ?? entry?.id ?? null,
-            timestamp: new Date().toISOString(),
-            tags,
-          });
-        } catch (indexErr) {
-          console.error("[stateful-memory] Recency index update failed:", indexErr.message);
+          const existing = await readRecencyIndex(indexPath);
+          const prev = existing.find(e => e.sessionPath === sessionPath);
+          if (prev?.tagmemEntryId) {
+            // Fire and forget — don't await the delete. It's slow (30-90s)
+            // and the duplicate will be cleaned up on the next save cycle.
+            tagmemClient.deleteEntry(prev.tagmemEntryId).then(() => {
+              console.log(`[stateful-memory] Deleted previous tagmem entry ${prev.tagmemEntryId}`);
+            }).catch(err => {
+              console.error(`[stateful-memory] Background delete failed: ${err.message}`);
+            });
+          }
+        } catch (dedupErr) {
+          console.error("[stateful-memory] Dedup lookup failed:", dedupErr.message);
         }
-
-        if (ctx.hasUI) ctx.ui.notify("Session transcript saved.", "info");
-        return entry;
-      } catch (err) {
-        console.error("[stateful-memory] Failed to save transcript to tagmem:", err.message);
-        if (ctx.hasUI) ctx.ui.notify("Session transcript failed to save.", "warning");
-        return null;
       }
-    };
 
-    if (background) {
-      // Fire and forget — don't block the session transition
-      doWrite().catch(err => {
-        console.error("[stateful-memory] Background save failed:", err.message);
+      const entry = await tagmemClient.add({
+        depth: 2,
+        title: slugifyKeywords(transcript, 8),
+        body: transcript,
+        tags,
+        origin: sessionPath,
       });
-      return null; // caller doesn't wait for result
-    }
 
-    return doWrite();
+      // Update recency index
+      try {
+        await updateRecencyIndex(indexPath, {
+          sessionPath,
+          tagmemEntryId: entry?.entry?.id ?? entry?.id ?? null,
+          timestamp: new Date().toISOString(),
+          tags,
+        });
+      } catch (indexErr) {
+        console.error("[stateful-memory] Recency index update failed:", indexErr.message);
+      }
+
+      if (ctx.hasUI) ctx.ui.notify("Session transcript saved.", "info");
+      return entry;
+    } catch (err) {
+      console.error("[stateful-memory] Failed to save transcript to tagmem:", err.message);
+      if (ctx.hasUI) ctx.ui.notify("Session transcript failed to save.", "warning");
+      return null;
+    }
   }
 
   // ── Event Handlers ────────────────────────────────────────────────────
@@ -509,8 +502,7 @@ export default function (pi) {
 
   pi.on("session_before_switch", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
-    // Background save — don't block the session switch
-    await summarizeCurrentSession(ctx, { reason: "session-switch", background: true });
+    await summarizeCurrentSession(ctx, { reason: "session-switch" });
   });
 
   // session_before_fork handler removed — parent session gets its own
@@ -518,7 +510,6 @@ export default function (pi) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
-    // Await on shutdown — last chance to save, process is about to exit
     await summarizeCurrentSession(ctx, { reason: "session-shutdown" });
   });
 
