@@ -504,13 +504,13 @@ export default function (pi) {
           const entCount = mentioned.length;
           const parts = [`${memCount} memories`];
           if (entCount > 0) parts.push(`${entCount} ${entCount === 1 ? "entity" : "entities"}`);
-          ctx.ui.setStatus("stateful-memory-enrichment", `Enrichment: ${parts.join(", ")}`);
+          ctx.ui.notify(`Memory enriched: ${parts.join(", ")}.`, "info");
         }
       } catch (err) {
         console.error("[stateful-memory] enrichment failed:", err.message);
         sessionEnriched = true; // don't retry on every message
         if (ctx.hasUI) {
-          ctx.ui.setStatus("stateful-memory-enrichment", `Enrichment: ✗ ${err.message.split("\n")[0].slice(0, 50)}`);
+          ctx.ui.notify(`Memory enrichment failed: ${err.message.split("\n")[0].slice(0, 60)}`, "warning");
         }
       }
     }
