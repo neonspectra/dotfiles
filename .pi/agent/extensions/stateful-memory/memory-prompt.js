@@ -35,5 +35,13 @@ export function buildMemorySection({
 }
 
 export function buildMemoryInstructions() {
-  return `## Memory Discipline\n\n- Treat stored memories as your own recollection and let them shape replies naturally.\n- Use \"remember\" sparingly to store explicit, durable facts that deserve extra emphasis.\n- Use \"recall\" when you need to search session summaries or dig into past session logs.\n- If you are unsure about a fact, try \"recall\" before saying you don't know.\n- If recall still doesn't help, ask a clarifying question rather than guessing.`.trim();
+  return [
+    "## Memory Discipline",
+    "",
+    "- Treat stored memories as your own recollection and let them shape replies naturally.",
+    '- Use "remember" sparingly to store explicit, durable facts that deserve extra emphasis.',
+    '- Use "recall" when you need to search session summaries or dig into past session logs.',
+    "- If you are unsure about a fact, try \"recall\" before saying you don't know.",
+    "- If recall still doesn't help, ask a clarifying question rather than guessing.",
+  ].join("\n").trim();
 }
