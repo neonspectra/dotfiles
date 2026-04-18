@@ -302,22 +302,19 @@ export default function (pi) {
     try {
       await ensureTagmem();
 
-      // Dedup: delete previous entry for this session, but don't let failure block the write
+      // Dedup: delete previous entry for this session
       if (sessionPath) {
         try {
           const existing = await readRecencyIndex(indexPath);
           const prev = existing.find(e => e.sessionPath === sessionPath);
           if (prev?.tagmemEntryId) {
-            // Fire and forget — don't await the delete. It's slow (30-90s)
-            // and the duplicate will be cleaned up on the next save cycle.
-            tagmemClient.deleteEntry(prev.tagmemEntryId).then(() => {
-              console.log(`[stateful-memory] Deleted previous tagmem entry ${prev.tagmemEntryId}`);
-            }).catch(err => {
-              console.error(`[stateful-memory] Background delete failed: ${err.message}`);
-            });
+            await tagmemClient.deleteEntry(prev.tagmemEntryId);
+            console.log(`[stateful-memory] Deleted previous tagmem entry ${prev.tagmemEntryId}`);
           }
         } catch (dedupErr) {
-          console.error("[stateful-memory] Dedup lookup failed:", dedupErr.message);
+          // Delete failed — continue with the add anyway.
+          // A duplicate is better than losing the session entirely.
+          console.error("[stateful-memory] Dedup delete failed (continuing):", dedupErr.message);
         }
       }
 

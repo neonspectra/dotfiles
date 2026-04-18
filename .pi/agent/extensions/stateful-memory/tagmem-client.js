@@ -19,8 +19,8 @@ import net from "node:net";
 const DEFAULT_SOCKET_PATH =
   (process.env.XDG_RUNTIME_DIR || "/run/user/1002") + "/tagmem.sock";
 
-const REQUEST_TIMEOUT_MS = 30_000;
-const ADD_TIMEOUT_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 60_000;
+const WRITE_TIMEOUT_MS = 180_000;  // add/delete can queue behind other ops
 
 export class TagmemClient {
   /** @type {string} */
@@ -110,7 +110,7 @@ export class TagmemClient {
    * @returns {Promise<{entry: object}>}
    */
   async add(entry) {
-    return this.#callTool("tagmem_add_entry", entry, { timeoutMs: ADD_TIMEOUT_MS });
+    return this.#callTool("tagmem_add_entry", entry, { timeoutMs: WRITE_TIMEOUT_MS });
   }
 
   /**
@@ -139,7 +139,7 @@ export class TagmemClient {
    * @returns {Promise<object>}
    */
   async deleteEntry(id) {
-    return this.#callTool("tagmem_delete_entry", { id }, { timeoutMs: ADD_TIMEOUT_MS });
+    return this.#callTool("tagmem_delete_entry", { id }, { timeoutMs: WRITE_TIMEOUT_MS });
   }
 
   /**
