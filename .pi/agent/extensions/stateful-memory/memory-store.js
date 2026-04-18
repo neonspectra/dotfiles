@@ -37,45 +37,10 @@ export function slugifyTopic(text, maxWords = 6) {
 }
 
 const SLUG_STOP_WORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "but",
-  "by",
-  "for",
-  "from",
-  "has",
-  "have",
-  "i",
-  "if",
-  "in",
-  "is",
-  "it",
-  "me",
-  "my",
-  "of",
-  "on",
-  "or",
-  "our",
-  "she",
-  "that",
-  "the",
-  "their",
-  "they",
-  "this",
-  "to",
-  "we",
-  "what",
-  "when",
-  "where",
-  "who",
-  "with",
-  "you",
-  "your",
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+  "has", "have", "i", "if", "in", "is", "it", "me", "my", "of", "on", "or",
+  "our", "she", "that", "the", "their", "they", "this", "to", "we", "what",
+  "when", "where", "who", "with", "you", "your",
 ]);
 
 export function slugifyKeywords(text, maxWords = 6) {
@@ -106,46 +71,13 @@ export function slugifyKeywords(text, maxWords = 6) {
   return keywords.length > 0 ? keywords.join("-") : "untitled";
 }
 
-export function formatMemoryLine({
-  text,
-  tags = [],
-  timestamp = new Date(),
-  sessionPath = "unknown",
-}) {
-  const sessionSection = sessionPath
-    ? ` [session: ${sessionPath}]`
-    : "";
-  const tagSection = tags.length > 0 ? ` [tags: ${tags.join(", ")}]` : "";
-  return `- [${formatTimestamp(timestamp)}]${sessionSection}${tagSection} ${text}`.trim();
-}
-
-export function parseMemoryLine(line) {
-  const match = line.match(
-    /^-\s+\[(?<timestamp>[^\]]+)\](?:\s+\[session:\s*(?<session>[^\]]+)\])?(?:\s+\[tags:\s*(?<tags>[^\]]+)\])?\s+(?<text>.+)$/
-  );
-  if (!match?.groups) {
-    return null;
-  }
-  const tags = match.groups.tags
-    ? match.groups.tags.split(",").map((tag) => tag.trim()).filter(Boolean)
-    : [];
-  return {
-    timestamp: match.groups.timestamp,
-    sessionPath: match.groups.session,
-    tags,
-    text: match.groups.text,
-    raw: line,
-  };
-}
-
 export class MemoryStore {
-  constructor({ memoryDir, personaFile, auxiliaryPersonaFiles = [], factsFile, wakeFile, memoryFile }) {
+  constructor({ memoryDir, personaFile, auxiliaryPersonaFiles = [], factsFile, wakeFile }) {
     this.memoryDir = memoryDir;
     this.personaFile = personaFile;
     this.auxiliaryPersonaFiles = auxiliaryPersonaFiles;
     this.factsFile = factsFile;
     this.wakeFile = wakeFile;
-    this.memoryFile = memoryFile;
     this.sessionPath = "unknown";
     this.sessionStartedAt = new Date();
   }
@@ -159,35 +91,7 @@ export class MemoryStore {
     }
   }
 
-  setMemoryFile(fileName) {
-    this.memoryFile = fileName;
-  }
-
-  get memoryFilePath() {
-    return path.join(this.memoryDir, this.memoryFile);
-  }
-
-  get sessionStamp() {
-    return formatSessionStamp(this.sessionStartedAt);
-  }
-
-  getSessionFileName(topicSlug = "untitled") {
-    return `session-${this.sessionStamp}__${topicSlug}.md`;
-  }
-
   async ensureFiles({ defaultPersona, defaultUserProfile } = {}) {
-    if (!this.memoryFile) {
-      throw new Error("Memory file name is not set.");
-    }
-
-    await fs.mkdir(this.memoryDir, { recursive: true });
-
-    const header = `# Session Memory\n\nSession: ${this.sessionPath}\nStarted: ${formatTimestamp(
-      this.sessionStartedAt
-    )}\n`;
-
-    await this.#ensureFile(this.memoryFilePath, `${header}\n`);
-
     if (this.personaFile) {
       await this.#ensureFile(
         this.personaFile,
@@ -249,148 +153,5 @@ export class MemoryStore {
       }
       throw error;
     }
-  }
-
-  async readMemoryEntries() {
-    return this.#readMemoryFileEntries(this.memoryFilePath);
-  }
-
-  async readAllMemoryEntries() {
-    const files = await this.#listMemoryFiles();
-    const entries = [];
-
-    for (const file of files) {
-      const fileEntries = await this.#readMemoryFileEntries(
-        path.join(this.memoryDir, file)
-      );
-      entries.push(...fileEntries);
-    }
-
-    return entries;
-  }
-
-  async listMemoryFiles() {
-    return this.#listMemoryFiles();
-  }
-
-  async readMemoryFile(fileName) {
-    return this.#readFileSafe(path.join(this.memoryDir, fileName));
-  }
-
-  async readMemoryFileEntries(fileName) {
-    return this.#readMemoryFileEntries(path.join(this.memoryDir, fileName));
-  }
-
-  async upsertSessionSummary(text, { tags = [] } = {}) {
-    const summaryTags = ["session-summary", ...tags]
-      .map((tag) => tag?.trim())
-      .filter(Boolean);
-    const line = formatMemoryLine({
-      text,
-      tags: [...new Set(summaryTags)],
-      sessionPath: this.sessionPath,
-    });
-
-    const raw = await this.#readFileSafe(this.memoryFilePath);
-    const lines = raw.split("\n");
-
-    const filtered = lines.filter((entry) => {
-      const parsed = parseMemoryLine(entry.trim());
-      if (!parsed) {
-        return true;
-      }
-      return !parsed.tags.includes("session-summary");
-    });
-
-    let insertIndex = filtered.findIndex((entry) => entry.trim().startsWith("- ["));
-    if (insertIndex === -1) {
-      insertIndex = filtered.length;
-    }
-
-    filtered.splice(insertIndex, 0, line);
-
-    let output = filtered.join("\n");
-    if (!output.endsWith("\n")) {
-      output += "\n";
-    }
-
-    await fs.writeFile(this.memoryFilePath, output, "utf8");
-    return line;
-  }
-
-  async #readMemoryFileEntries(filePath) {
-    const raw = await this.#readFileSafe(filePath);
-    return raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map(parseMemoryLine)
-      .filter(Boolean);
-  }
-
-  async #listMemoryFiles() {
-    try {
-      const entries = await fs.readdir(this.memoryDir, {
-        withFileTypes: true,
-      });
-      return entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-        .map((entry) => entry.name)
-        .sort();
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return [];
-      }
-      throw error;
-    }
-  }
-
-  async appendMemories(items, { tags = [] } = {}) {
-    const lines = items
-      .map((text) => text?.trim())
-      .filter(Boolean)
-      .map((text) =>
-        formatMemoryLine({
-          text,
-          tags,
-          sessionPath: this.sessionPath,
-        })
-      );
-
-    if (lines.length === 0) {
-      return [];
-    }
-
-    const payload = `\n${lines.join("\n")}\n`;
-    await fs.appendFile(this.memoryFilePath, payload, "utf8");
-    return lines;
-  }
-
-  async appendFacts(items, { heading = "Learned Facts" } = {}) {
-    if (!this.factsFile) {
-      return [];
-    }
-
-    const additions = items
-      .map((text) => text?.trim())
-      .filter(Boolean)
-      .map((text) => `- ${text}`);
-
-    if (additions.length === 0) {
-      return [];
-    }
-
-    let current = await this.#readFileSafe(this.factsFile);
-    const header = `## ${heading}`;
-
-    if (!current.includes(header)) {
-      current = `${current.trimEnd()}\n\n${header}\n`;
-    } else if (!current.endsWith("\n")) {
-      current += "\n";
-    }
-
-    current += `${additions.join("\n")}\n`;
-    await fs.writeFile(this.factsFile, current, "utf8");
-    return additions;
   }
 }

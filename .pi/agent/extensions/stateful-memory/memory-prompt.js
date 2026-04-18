@@ -2,8 +2,8 @@ export function buildMemorySection({
   persona,
   facts,
   wakeContext,
-  memories,
-  recentMemories,
+  enrichedContext,
+  entityContext,
 }) {
   const sections = [];
 
@@ -19,14 +19,12 @@ export function buildMemorySection({
     sections.push(`### Pinned Facts\n${facts.trim()}`);
   }
 
-  if (recentMemories?.length) {
-    const recentLines = recentMemories.map((entry) => `- ${entry.text}`);
-    sections.push(`### Recent Themes\n${recentLines.join("\n")}`);
+  if (enrichedContext?.trim()) {
+    sections.push(`### Relevant Memory Context\n${enrichedContext.trim()}`);
   }
 
-  if (memories?.length) {
-    const memoryLines = memories.map((entry) => `- ${entry.text}`);
-    sections.push(`### Recollections\n${memoryLines.join("\n")}`);
+  if (entityContext?.trim()) {
+    sections.push(`### Entity State\n${entityContext.trim()}`);
   }
 
   if (sections.length === 0) {

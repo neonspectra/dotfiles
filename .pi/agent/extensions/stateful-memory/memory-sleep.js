@@ -29,6 +29,8 @@ import {
   SettingsManager,
   getAgentDir,
 } from "@mariozechner/pi-coding-agent";
+import { TagmemClient } from "./tagmem-client.js";
+import { NeotomaClient } from "./neotoma-client.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -54,35 +56,50 @@ const FALLBACK_MODEL_CANDIDATES = [
 // cascading delegate chains and 25+ minute runtimes), we concatenate all session
 // summaries into a single file before spawning the fork.
 
-async function aggregateSessionSummaries(memoryDir) {
-  // memoryDir already points to the sessions directory (e.g. .../memory/sessions)
-  // so we use it directly rather than appending another "sessions/" segment.
-  const sessionsDir = memoryDir;
-  let files;
+async function aggregateFromTagmem(memoryDir) {
+  // Query tagmem for recent session summaries (depth 1) instead of reading
+  // hundreds of individual markdown files.
+  const tagmem = new TagmemClient();
   try {
-    files = (await fs.readdir(sessionsDir))
-      .filter((f) => f.endsWith(".md"))
-      .sort(); // chronological by filename
-  } catch {
-    return null; // no sessions directory
+    await tagmem.connect();
+
+    const recentSearch = await tagmem.search("recent sessions", { limit: 50, depth: 1 });
+    const entries = recentSearch.entries || [];
+    if (entries.length === 0) {
+      tagmem.close();
+      return null;
+    }
+
+    const recentBodies = await Promise.all(
+      entries.map(e => tagmem.show(e.id))
+    );
+    const archiveContent = recentBodies
+      .map(r => `--- ${r.entry.title} ---\n${r.entry.body}`)
+      .join("\n\n");
+    const outPath = join(memoryDir, "..", "_sleep-session-archive.md");
+    await fs.writeFile(outPath, archiveContent, "utf-8");
+
+    tagmem.close();
+    return outPath;
+  } catch (err) {
+    console.error("[sleep] tagmem pre-query failed:", err.message);
+    tagmem.close();
+    return null;
   }
+}
 
-  const sections = [];
-  for (const file of files) {
-    const content = await fs.readFile(join(sessionsDir, file), "utf-8");
-    const trimmed = content.trim();
-    // Skip empty stubs (just the header + session path, no actual content)
-    const lines = trimmed.split("\n").filter((l) => l.trim().length > 0);
-    if (lines.length <= 3) continue;
-    sections.push(`--- ${file} ---\n${trimmed}`);
+async function writeEntityState(memoryDir) {
+  // Export Neotoma entity snapshots for the FACTS fork to reference.
+  const neo = new NeotomaClient();
+  try {
+    const { entities } = await neo.listEntities();
+    const outPath = join(memoryDir, "..", "_sleep-entity-state.json");
+    await fs.writeFile(outPath, JSON.stringify(entities, null, 2), "utf-8");
+    return outPath;
+  } catch (err) {
+    console.error("[sleep] neotoma entity export failed:", err.message);
+    return null;
   }
-
-  if (sections.length === 0) return null;
-
-  const aggregated = sections.join("\n\n");
-  const outPath = join(memoryDir, "..", "_sleep-session-archive.md");
-  await fs.writeFile(outPath, aggregated, "utf-8");
-  return outPath;
 }
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
@@ -330,7 +347,17 @@ function buildWakeTask({ archiveFile, wakeFile }) {
   ].join("\n");
 }
 
-function buildFactsTask({ archiveFile, factsFile }) {
+function buildFactsTask({ archiveFile, factsFile, entitiesFile }) {
+  const entityStep = entitiesFile
+    ? [
+        "",
+        `Step 2b: Read the current entity state at: ${entitiesFile}`,
+        "This is a JSON file containing Neotoma entity snapshots — structured state about",
+        "people, projects, decisions, and environment. Use it as additional context for",
+        "what's current and important.",
+      ].join("\n")
+    : "";
+
   return [
     "=== SLEEP PHASE: FACTS.md ===",
     "",
@@ -346,6 +373,7 @@ function buildFactsTask({ archiveFile, factsFile }) {
     "DO NOT attempt to read individual session files or raw JSONL session logs.",
     "",
     `Step 2: Read the current FACTS.md at: ${factsFile}`,
+    entityStep,
     "",
     "Step 3: Rewrite FACTS.md.",
     "FACTS.md holds the things you've decided are worth always having at hand —",
@@ -458,17 +486,25 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     warn(`Pre-sleep summary failed (continuing): ${err.message}`);
   }
 
-  // ── Phase 0.5: Pre-aggregate session summaries ─────────────────────────
-  // Concatenate all non-empty session summaries into a single file so forks
-  // can read one file instead of 300+ individual reads (which caused 25+ min
-  // runtimes and timeout failures).
-  notify("Pre-aggregating session summaries...");
-  const archiveFile = await aggregateSessionSummaries(memoryDir);
+  // ── Phase 0.5: Pre-aggregate from tagmem + export entities ──────────────
+  // Query tagmem for recent session summaries instead of reading hundreds
+  // of individual markdown files.
+  notify("Pre-aggregating session summaries from tagmem...");
+  const archiveFile = await aggregateFromTagmem(memoryDir);
   if (!archiveFile) {
-    warn("No session summaries found — forks will have limited context");
+    warn("No session summaries found in tagmem — forks will have limited context");
   } else {
     const archiveStats = await fs.stat(archiveFile);
     notify(`Session archive: ${(archiveStats.size / 1024).toFixed(0)}KB`);
+  }
+
+  // Export Neotoma entity snapshots for the FACTS fork
+  notify("Exporting entity state from Neotoma...");
+  const entitiesFile = await writeEntityState(memoryDir);
+  if (entitiesFile) {
+    notify("Entity state exported ✓");
+  } else {
+    warn("Entity state export failed (continuing without)");
   }
 
   // ── Shared infra for all forks (avoids re-reading settings/auth per attempt)
@@ -494,7 +530,7 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 2: FACTS.md ──────────────────────────────────────────────────
   notify("Phase 2/3: Curating FACTS.md...");
   const factsResult = await runSleepFork({
-    task: buildFactsTask({ archiveFile: archiveFile ?? "(no sessions found)", factsFile }),
+    task: buildFactsTask({ archiveFile: archiveFile ?? "(no sessions found)", factsFile, entitiesFile }),
     cwd: ctx.cwd,
     infra,
   });
@@ -522,12 +558,10 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     notify(`Phase 3/3: Dream written → ${path.basename(dreamFile)} ✓`);
   }
 
-  // ── Cleanup: remove temp archive ────────────────────────────────────────
-  if (archiveFile) {
-    try {
-      await fs.unlink(archiveFile);
-    } catch {
-      // best-effort cleanup
+  // ── Cleanup: remove temp files ─────────────────────────────────────────
+  for (const tmpFile of [archiveFile, entitiesFile]) {
+    if (tmpFile) {
+      try { await fs.unlink(tmpFile); } catch { /* best-effort */ }
     }
   }
 
