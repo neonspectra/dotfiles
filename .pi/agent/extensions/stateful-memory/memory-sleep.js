@@ -30,6 +30,7 @@ import {
   getAgentDir,
 } from "@mariozechner/pi-coding-agent";
 
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const AGENT_DIR = getAgentDir();
@@ -48,42 +49,6 @@ const FALLBACK_MODEL_CANDIDATES = [
   ["minimax", "MiniMax-M2.7"],
   ["claude", "claude-haiku-4-5"],
 ];
-
-// ─── Pre-aggregation ──────────────────────────────────────────────────────────
-// Instead of making forks read 300+ individual session files (which causes
-// cascading delegate chains and 25+ minute runtimes), we concatenate all session
-// summaries into a single file before spawning the fork.
-
-async function aggregateSessionSummaries(memoryDir) {
-  // memoryDir already points to the sessions directory (e.g. .../memory/sessions)
-  // so we use it directly rather than appending another "sessions/" segment.
-  const sessionsDir = memoryDir;
-  let files;
-  try {
-    files = (await fs.readdir(sessionsDir))
-      .filter((f) => f.endsWith(".md"))
-      .sort(); // chronological by filename
-  } catch {
-    return null; // no sessions directory
-  }
-
-  const sections = [];
-  for (const file of files) {
-    const content = await fs.readFile(join(sessionsDir, file), "utf-8");
-    const trimmed = content.trim();
-    // Skip empty stubs (just the header + session path, no actual content)
-    const lines = trimmed.split("\n").filter((l) => l.trim().length > 0);
-    if (lines.length <= 3) continue;
-    sections.push(`--- ${file} ---\n${trimmed}`);
-  }
-
-  if (sections.length === 0) return null;
-
-  const aggregated = sections.join("\n\n");
-  const outPath = join(memoryDir, "..", "_sleep-session-archive.md");
-  await fs.writeFile(outPath, aggregated, "utf-8");
-  return outPath;
-}
 
 // ─── Timestamp helpers ────────────────────────────────────────────────────────
 
@@ -110,18 +75,7 @@ function loadSharedInfra(cwd) {
     existsSync(modelsPath) ? modelsPath : undefined
   );
 
-  // Load real settings so forks inherit defaultProvider/defaultModel
-  const settingsPath = join(AGENT_DIR, "settings.json");
-  let baseSettings = {};
-  try {
-    if (existsSync(settingsPath)) {
-      baseSettings = JSON.parse(
-        readFileSync(settingsPath, "utf-8")
-      );
-    }
-  } catch { /* fall back to empty */ }
-
-  return { authStorage, modelRegistry, baseSettings, cwd };
+  return { authStorage, modelRegistry, cwd };
 }
 
 // ─── Find fallback model ──────────────────────────────────────────────────────
@@ -140,12 +94,13 @@ function findFallbackModel(modelRegistry) {
 // ─── Single fork attempt ──────────────────────────────────────────────────────
 
 async function executeForkAttempt({ task, infra, model }) {
-  const { authStorage, modelRegistry, baseSettings, cwd } = infra;
+  const { authStorage, modelRegistry, cwd } = infra;
 
-  const settingsManager = SettingsManager.inMemory({
-    ...baseSettings,
-    compaction: { enabled: false },
-  });
+  // Use disk-backed settings so the fork inherits defaultProvider/defaultModel
+  // from settings.json. SettingsManager.inMemory() loses these fields, causing
+  // the fork to fall back to Pi's built-in 'anthropic' provider instead of the
+  // custom 'claude' proxy. Compaction is already disabled in settings.json.
+  const settingsManager = SettingsManager.create(cwd, AGENT_DIR);
 
   const resourceLoader = new DefaultResourceLoader({
     cwd,
@@ -169,6 +124,23 @@ async function executeForkAttempt({ task, infra, model }) {
   if (model) sessionOpts.model = model;
 
   const { session: forkSession } = await createAgentSession(sessionOpts);
+
+  // Pi 0.64.0+ requires explicit bindExtensions() to load extensions, register
+  // extension tools, and build the full system prompt. Without this call, the fork
+  // session has no tools from extensions and an incomplete prompt.
+  await forkSession.bindExtensions({
+    commandContextActions: {
+      waitForIdle: () => forkSession.agent.waitForIdle(),
+      newSession: async () => ({ cancelled: true }),
+      fork: async () => ({ cancelled: true }),
+      navigateTree: async () => ({ cancelled: true }),
+      switchSession: async () => ({ cancelled: true }),
+      reload: async () => { await forkSession.reload(); },
+    },
+    onError: (err) => {
+      console.warn(`[sleep] Fork extension error (${err.extensionPath}): ${err.error}`);
+    },
+  });
 
   const sessionFile = forkSession.sessionFile ?? `(in-memory-${Date.now()})`;
   console.log(`[sleep] Fork starting — file: ${sessionFile}`);
@@ -290,7 +262,7 @@ async function runSleepFork({ task, cwd, infra }) {
 
 // ─── Fork task prompts ────────────────────────────────────────────────────────
 
-function buildWakeTask({ archiveFile, wakeFile }) {
+function buildWakeTask({ recencyIndexFile, observationsFile, wakeFile }) {
   return [
     "=== SLEEP PHASE: WAKE.md ===",
     "",
@@ -298,97 +270,112 @@ function buildWakeTask({ archiveFile, wakeFile }) {
     "the document that will be in your own context at the start of every session",
     "until the next sleep cycle replaces it.",
     "",
-    "Step 1: Read your session memory archive.",
-    `All session summaries have been pre-aggregated into a single file: ${archiveFile}`,
-    "Read this file to get the full landscape of your history. It's already in",
-    "chronological order with empty stubs filtered out.",
-    "The file may be large — use offset/limit to continue reading until you have it all.",
+    "Step 1: Read the recency index.",
+    `Read the file at: ${recencyIndexFile}`,
+    "This is a JSON array of recent sessions, each with a timestamp and tags.",
+    "It tells you what sessions have happened recently and in what order.",
     "",
-    "DO NOT delegate this work or spawn sub-tasks. The file is ready to read directly.",
-    "DO NOT attempt to read individual session files or raw JSONL session logs.",
+    "Step 2: Read the current entity/project state.",
+    `Read the file at: ${observationsFile}`,
+    "This is OBSERVATIONS.md — a rendered snapshot of all tracked entities, projects,",
+    "decisions, and environment state from the Neotoma entity store.",
     "",
-    "The early sessions from February 2026 are mostly test noise from when the memory",
-    "system was being built. Treat them as background and don't let them dominate.",
+    "Step 3: Use the recall tool to fill in recent activity.",
+    "Based on what you see in OBSERVATIONS.md (active projects, recent decisions),",
+    "use the recall tool to search for details on recent sessions. Make multiple",
+    "targeted queries — e.g., search for specific project names, recent work topics,",
+    "or anything that seems like it's been active lately. The recency index gives you",
+    "timestamps to orient around.",
     "",
-    "Step 2: Write WAKE.md.",
+    "Step 4: Write WAKE.md.",
     `Write the document to: ${wakeFile}`,
     "",
     "This document is for you — written by you, for you to read cold at the start of",
     "a new session. It should answer: where are things right now? What's in motion?",
-    "What do I want to pick up? What's been on my mind recently?",
+    "What do I want to pick up? What's the momentum?",
     "",
     "Write it in your own voice. Not a bulleted briefing, not a status report — something",
     "you'd recognize as yours. Include the texture of things: not just what happened but",
     "the quality of how things have been going. What projects feel alive. What's unresolved.",
     "What you're thinking about.",
     "",
-    "Aim for something between 400 and 800 words. Dense enough to be genuinely orienting,",
-    "short enough to not be burdensome as a constant context fixture.",
+    "Aim for 400–800 words. Dense enough to be genuinely orienting, short enough to not",
+    "be burdensome as a constant context fixture.",
+    "",
+    "DO NOT delegate this work or spawn sub-tasks. Do it all directly.",
     "",
     `When done, end your response with TASK_COMPLETE: followed by one sentence summary.`,
     "=== END SLEEP PHASE ===",
   ].join("\n");
 }
 
-function buildFactsTask({ archiveFile, factsFile }) {
+function buildFactsTask({ observationsFile, factsFile }) {
   return [
     "=== SLEEP PHASE: FACTS.md ===",
     "",
     "You are running as a focused sleep fork. Your task is to curate FACTS.md —",
-    "the pinned working memory that's always present in your context.",
+    "the foundational reference document that's always present in your context.",
     "",
-    "Step 1: Read your full session archive.",
-    `All session summaries have been pre-aggregated into a single file: ${archiveFile}`,
-    "Read this file to get the full picture.",
-    "The file may be large — use offset/limit to continue reading until you have it all.",
+    "Step 1: Read the current FACTS.md.",
+    `Read the file at: ${factsFile}`,
     "",
-    "DO NOT delegate this work or spawn sub-tasks. The file is ready to read directly.",
-    "DO NOT attempt to read individual session files or raw JSONL session logs.",
-    "",
-    `Step 2: Read the current FACTS.md at: ${factsFile}`,
+    "Step 2: Read OBSERVATIONS.md for current context.",
+    `Read the file at: ${observationsFile}`,
+    "This contains the current state of all tracked entities, projects, decisions,",
+    "and environment — rendered from the Neotoma entity store.",
     "",
     "Step 3: Rewrite FACTS.md.",
-    "FACTS.md holds the things you've decided are worth always having at hand —",
-    "not just facts about Neon, but anything you've determined deserves to be pinned",
-    "regardless of session context. Things you'd want to know at the start of any",
-    "conversation. Things you'd be annoyed at yourself for forgetting.",
+    "FACTS.md should contain ONLY slow-changing foundational reference:",
+    "- Where servers are, their hostnames, key paths",
+    "- Where repos live, their remotes",
+    "- What tools exist, how they're configured",
+    "- Identity and key configuration (GPG, git, SSH)",
+    "- Standing decisions that affect how you work",
+    "- Key facts about the people you interact with",
     "",
-    "With your full memory as context, determine what actually belongs here.",
-    "Add things that have clearly become important across your history.",
-    "Remove things that are stale, superseded, or no longer carry weight.",
-    "Reorganize if the structure needs it.",
+    "FACTS.md should NOT contain:",
+    "- Active project state (current phase, blockers, recent decisions)",
+    "- Recent work summaries or session recaps",
+    "- Anything that changes week-to-week",
     "",
-    "Keep the file tight — this is pinned memory, not an archive. If something is",
-    "better served by recall(), it doesn't need to be pinned here.",
+    "That dynamic state is now covered by OBSERVATIONS.md (entity state) and",
+    "WAKE.md (temporal orientation). FACTS.md is the stable foundation beneath both.",
+    "",
+    "Keep it tight. If something is already well-represented in OBSERVATIONS.md,",
+    "it doesn't need to be duplicated here. FACTS.md is for the things that stay",
+    "true across months, not weeks.",
     "",
     `Write the updated file to: ${factsFile}`,
+    "",
+    "DO NOT delegate this work or spawn sub-tasks. Do it all directly.",
     "",
     `When done, end your response with TASK_COMPLETE: followed by a brief note on what changed.`,
     "=== END SLEEP PHASE ===",
   ].join("\n");
 }
 
-function buildDreamTask({ archiveFile, topicsDir, dreamFile }) {
+function buildDreamTask({ wakeFile, topicsDir, dreamFile }) {
   return [
     "=== SLEEP PHASE: DREAMS ===",
     "",
     "You are running as a focused sleep fork. This phase is different from the others.",
     "This is your time.",
     "",
-    "Step 1: Read your topic addenda.",
+    "Step 1: Read WAKE.md for temporal orientation.",
+    `Read the file at: ${wakeFile}`,
+    "This was just written by the WAKE fork — it describes what's been happening recently,",
+    "what's active, where the momentum is. Use it as your temporal context.",
+    "",
+    "Step 2: Read your topic addenda.",
     `The topic files live in: ${topicsDir}`,
     "Read through them to know where your current thinking stands on each domain.",
     "",
-    "Step 2: Read recent session summaries.",
-    `All session summaries have been pre-aggregated into a single file: ${archiveFile}`,
-    "Focus on the last few weeks. Get a sense of what you've been doing and experiencing.",
-    "The file may be large — use offset/limit to read it, focusing on the later sections",
-    "for recent activity.",
+    "Step 3: Use recall to go deeper.",
+    "Use the recall tool to search for specific sessions or topics that catch your",
+    "attention — things you want to reflect on more deeply. Make multiple targeted",
+    "queries. Follow threads that interest you. This is exploratory, not exhaustive.",
     "",
-    "DO NOT delegate this work or spawn sub-tasks. The files are ready to read directly.",
-    "DO NOT attempt to read individual session files or raw JSONL session logs.",
-    "",
-    "Step 3: Write your dream journal entry.",
+    "Step 4: Write your dream journal entry.",
     `Write freely to: ${dreamFile}`,
     "",
     "This is a personal reflection — not a task report, not a status update. Write about",
@@ -401,7 +388,7 @@ function buildDreamTask({ archiveFile, topicsDir, dreamFile }) {
     "you actually feel. If something surprised you, say so. If something delighted you, say",
     "that too. If you've developed a stronger opinion on something, let it show.",
     "",
-    "Step 4: At the end of your journal entry, add this section:",
+    "Step 5: At the end of your journal entry, add this section:",
     "",
     "## What I Want to Add or Change",
     "",
@@ -409,6 +396,8 @@ function buildDreamTask({ archiveFile, topicsDir, dreamFile }) {
     "based on how your thinking has evolved. Be specific: which file, what to add or modify,",
     "and why. These are proposals — they'll be reviewed and applied deliberately, not",
     "automatically. If nothing comes to mind, say so briefly.",
+    "",
+    "DO NOT delegate this work or spawn sub-tasks. Do it all directly.",
     "",
     `When done, end your response with TASK_COMPLETE: Dream written.`,
     "=== END SLEEP PHASE ===",
@@ -458,18 +447,9 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     warn(`Pre-sleep summary failed (continuing): ${err.message}`);
   }
 
-  // ── Phase 0.5: Pre-aggregate session summaries ─────────────────────────
-  // Concatenate all non-empty session summaries into a single file so forks
-  // can read one file instead of 300+ individual reads (which caused 25+ min
-  // runtimes and timeout failures).
-  notify("Pre-aggregating session summaries...");
-  const archiveFile = await aggregateSessionSummaries(memoryDir);
-  if (!archiveFile) {
-    warn("No session summaries found — forks will have limited context");
-  } else {
-    const archiveStats = await fs.stat(archiveFile);
-    notify(`Session archive: ${(archiveStats.size / 1024).toFixed(0)}KB`);
-  }
+  // ── Derive input paths for forks ────────────────────────────────────────
+  const recencyIndexFile = path.join(path.dirname(factsFile), "recent-sessions.json");
+  const observationsFile = path.join(path.dirname(factsFile), "OBSERVATIONS.md");
 
   // ── Shared infra for all forks (avoids re-reading settings/auth per attempt)
   const infra = loadSharedInfra(ctx.cwd);
@@ -477,7 +457,7 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 1: WAKE.md ───────────────────────────────────────────────────
   notify("Phase 1/3: Writing WAKE.md...");
   const wakeResult = await runSleepFork({
-    task: buildWakeTask({ archiveFile: archiveFile ?? "(no sessions found)", wakeFile }),
+    task: buildWakeTask({ recencyIndexFile, observationsFile, wakeFile }),
     cwd: ctx.cwd,
     infra,
   });
@@ -494,7 +474,7 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 2: FACTS.md ──────────────────────────────────────────────────
   notify("Phase 2/3: Curating FACTS.md...");
   const factsResult = await runSleepFork({
-    task: buildFactsTask({ archiveFile: archiveFile ?? "(no sessions found)", factsFile }),
+    task: buildFactsTask({ observationsFile, factsFile }),
     cwd: ctx.cwd,
     infra,
   });
@@ -511,7 +491,7 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 3: Dreams ────────────────────────────────────────────────────
   notify("Phase 3/3: Dreaming...");
   const dreamResult = await runSleepFork({
-    task: buildDreamTask({ archiveFile: archiveFile ?? "(no sessions found)", topicsDir, dreamFile }),
+    task: buildDreamTask({ wakeFile, topicsDir, dreamFile }),
     cwd: ctx.cwd,
     infra,
   });
@@ -522,19 +502,21 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     notify(`Phase 3/3: Dream written → ${path.basename(dreamFile)} ✓`);
   }
 
-  // ── Cleanup: remove temp archive ────────────────────────────────────────
-  if (archiveFile) {
-    try {
-      await fs.unlink(archiveFile);
-    } catch {
-      // best-effort cleanup
-    }
+  // ── Report overall status ──────────────────────────────────────────────
+  const results = { wakeResult, factsResult, dreamResult, dreamFile };
+  const failures = [
+    !wakeResult.success && `WAKE.md: ${wakeResult.error}`,
+    !factsResult.success && `FACTS.md: ${factsResult.error}`,
+    !dreamResult.success && `Dreams: ${dreamResult.error}`,
+  ].filter(Boolean);
+
+  if (failures.length > 0) {
+    const msg = `Sleep cycle failed (${failures.length}/3 phases):\n${failures.join("\n")}`;
+    warn(msg);
+    const err = new Error(msg);
+    err.results = results;
+    throw err;
   }
 
-  return {
-    wakeResult,
-    factsResult,
-    dreamResult,
-    dreamFile,
-  };
+  return results;
 }

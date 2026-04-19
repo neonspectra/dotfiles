@@ -1,6 +1,20 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { tokenize } from "./memory-retriever.js";
+
+const STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+  "has", "have", "i", "if", "in", "is", "it", "me", "my", "of", "on", "or",
+  "our", "she", "that", "the", "their", "they", "this", "to", "we", "what",
+  "when", "where", "who", "with", "you", "your",
+]);
+
+function tokenize(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token && !STOP_WORDS.has(token));
+}
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n?/;
 

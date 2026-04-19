@@ -2,8 +2,9 @@ export function buildMemorySection({
   persona,
   facts,
   wakeContext,
-  memories,
-  recentMemories,
+  observations,
+  enrichedContext,
+  entityContext,
 }) {
   const sections = [];
 
@@ -19,14 +20,16 @@ export function buildMemorySection({
     sections.push(`### Pinned Facts\n${facts.trim()}`);
   }
 
-  if (recentMemories?.length) {
-    const recentLines = recentMemories.map((entry) => `- ${entry.text}`);
-    sections.push(`### Recent Themes\n${recentLines.join("\n")}`);
+  if (observations?.trim()) {
+    sections.push(`### Observations\n${observations.trim()}`);
   }
 
-  if (memories?.length) {
-    const memoryLines = memories.map((entry) => `- ${entry.text}`);
-    sections.push(`### Recollections\n${memoryLines.join("\n")}`);
+  if (enrichedContext?.trim()) {
+    sections.push(`### Relevant Memory Context\n${enrichedContext.trim()}`);
+  }
+
+  if (entityContext?.trim()) {
+    sections.push(`### Entity State\n${entityContext.trim()}`);
   }
 
   if (sections.length === 0) {
@@ -37,5 +40,15 @@ export function buildMemorySection({
 }
 
 export function buildMemoryInstructions() {
-  return `## Memory Discipline\n\n- Treat stored memories as your own recollection and let them shape replies naturally.\n- Use \"remember\" sparingly to store explicit, durable facts that deserve extra emphasis.\n- Use \"recall\" when you need to search session summaries or dig into past session logs.\n- If you are unsure about a fact, try \"recall\" before saying you don't know.\n- If recall still doesn't help, ask a clarifying question rather than guessing.`.trim();
+  return [
+    "## Memory Discipline",
+    "",
+    "- Treat stored memories as your own recollection and let them shape replies naturally.",
+    '- Use "remember" whenever a durable fact surfaces — project state changes, decisions, new information about people, environment changes.',
+    '- Use "remember" when something contradicts your existing knowledge — supersede or correct stale observations.',
+    "- Neotoma handles deduplication and conflict resolution, so remembering redundantly is better than forgetting.",
+    '- Use "recall" when you need to search session summaries or dig into past session logs.',
+    "- If you are unsure about a fact, try \"recall\" before saying you don't know.",
+    "- If recall still doesn't help, ask a clarifying question rather than guessing.",
+  ].join("\n").trim();
 }
