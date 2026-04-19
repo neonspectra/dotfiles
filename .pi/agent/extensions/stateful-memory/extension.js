@@ -62,6 +62,40 @@ export default function (pi) {
     return neotomaClient;
   }
 
+  // ── Date extraction helpers ───────────────────────────────────────
+
+  /**
+   * Extract the session date from a normalized transcript's header.
+   * Looks for a line like `# Date: 2026-03-23T15:27:03.594Z`
+   * @param {string} body
+   * @returns {string|null} ISO date string or null
+   */
+  function extractSessionDate(body) {
+    if (!body) return null;
+    const match = body.match(/^# Date:\s*(.+)$/m);
+    if (!match) return null;
+    const dateStr = match[1].trim();
+    // Validate it parses
+    const ts = Date.parse(dateStr);
+    return Number.isNaN(ts) ? null : dateStr;
+  }
+
+  /**
+   * Format a date string into a readable label like "Mar 23, 2026".
+   * @param {string} dateStr — ISO date string
+   * @returns {string}
+   */
+  function formatSessionDate(dateStr) {
+    if (!dateStr) return "unknown date";
+    try {
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return "unknown date";
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    } catch {
+      return "unknown date";
+    }
+  }
+
   // ── Session tag detection ─────────────────────────────────────────────
 
   function determineSessionTags(summary, activeTopicsMap) {
@@ -471,7 +505,9 @@ export default function (pi) {
             const truncated = body.length > 3000
               ? body.slice(0, 3000) + "\n(truncated)"
               : body;
-            return `**${r.entry.title}**\n${truncated}`;
+            const sessionDate = extractSessionDate(body) || r.entry.created_at;
+            const dateLabel = formatSessionDate(sessionDate);
+            return `**${r.entry.title}** *(${dateLabel})*\n${truncated}`;
           })
           .join("\n\n---\n\n");
       }
@@ -693,7 +729,9 @@ export default function (pi) {
 
       const memoryLines = bodies.map(r => {
         const e = r.entry;
-        return `### ${e.title}\n*depth ${e.depth} | tags: ${(e.tags || []).join(", ")}*\n\n${e.body}`;
+        const sessionDate = extractSessionDate(e.body) || e.created_at;
+        const dateLabel = formatSessionDate(sessionDate);
+        return `### ${e.title}\n*${dateLabel} | depth ${e.depth} | tags: ${(e.tags || []).join(", ")}*\n\n${e.body}`;
       });
 
       // Search Neotoma for entity matches
