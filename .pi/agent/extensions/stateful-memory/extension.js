@@ -412,7 +412,7 @@ export default function (pi) {
     if (!sessionEnriched && event.prompt?.trim()) {
       if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Enriching memory...");
 
-      // Neotoma is fast (~900ms) — always run it
+      // Neotoma is always fast (~900ms) — run unconditionally
       const neotomaPromise = (async () => {
         try {
           const neo = ensureNeotoma();
@@ -427,59 +427,36 @@ export default function (pi) {
         }
       })();
 
-      // tagmem can be slow if the proxy is busy — race against a 15s timer
-      const tagmemPromise = (async () => {
+      // Check proxy queue before committing to a tagmem search
+      let doTagmemSearch = true;
+      try {
+        await ensureTagmem();
+        const qs = await tagmemClient.queueStatus();
+        if (qs.queue_depth > 0 && ctx.hasUI) {
+          doTagmemSearch = await ctx.ui.confirm(
+            "Memory enrichment",
+            `tagmem has ${qs.queue_depth} save job${qs.queue_depth > 1 ? "s" : ""} in queue. Wait for memory context?`
+          );
+          if (doTagmemSearch && ctx.hasUI) {
+            ctx.ui.setStatus("stateful-memory-enrich", "Waiting for tagmem...");
+          }
+        }
+      } catch (err) {
+        console.error("[stateful-memory] queue check failed:", err.message);
+        doTagmemSearch = false;
+      }
+
+      let tagmemResult = { entries: [], bodies: [] };
+      if (doTagmemSearch) {
         try {
           await ensureTagmem();
           const searchResults = await tagmemClient.search(event.prompt, { limit: 5 });
           const topEntries = searchResults.entries?.slice(0, 3) || [];
           const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
-          return { entries: topEntries, bodies };
+          tagmemResult = { entries: topEntries, bodies };
         } catch (err) {
           console.error("[stateful-memory] tagmem enrichment failed:", err.message);
-          return { entries: [], bodies: [] };
         }
-      })();
-
-      // Wait for tagmem with interactive timeout
-      let tagmemResult = { entries: [], bodies: [] };
-      const ENRICHMENT_PATIENCE_MS = 15_000;
-
-      const settled = await Promise.race([
-        tagmemPromise.then(r => ({ resolved: true, result: r })),
-        new Promise(resolve => setTimeout(() => resolve({ resolved: false }), ENRICHMENT_PATIENCE_MS)),
-      ]);
-
-      if (settled.resolved) {
-        tagmemResult = settled.result;
-      } else if (ctx.hasUI) {
-        // tagmem is taking long — ask the user if they want to keep waiting
-        let queueInfo = "";
-        try {
-          await ensureTagmem();
-          const qs = await tagmemClient.queueStatus();
-          if (qs.queue_depth > 0) {
-            queueInfo = ` (${qs.queue_depth} save job${qs.queue_depth > 1 ? "s" : ""} in queue)`;
-          }
-        } catch (_) { /* queue status is best-effort */ }
-
-        // Show confirm while tagmem continues running in the background
-        const keepWaiting = await Promise.race([
-          ctx.ui.confirm(
-            "Memory enrichment is slow",
-            `tagmem is still processing${queueInfo}. Keep waiting for memory context?`
-          ),
-          tagmemPromise.then(r => { tagmemResult = r; return "resolved"; }),
-        ]);
-
-        if (keepWaiting === "resolved") {
-          // tagmem resolved while the dialog was shown — use the result
-        } else if (keepWaiting === true) {
-          // User chose to keep waiting
-          if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Still enriching...");
-          tagmemResult = await tagmemPromise;
-        }
-        // else: user chose to skip — tagmemResult stays empty
       }
 
       const mentioned = await neotomaPromise;
@@ -505,7 +482,7 @@ export default function (pi) {
 
       sessionEnriched = true;
       if (ctx.hasUI) {
-        ctx.ui.setStatus("stateful-memory-enrich", ""); // clear status
+        ctx.ui.setStatus("stateful-memory-enrich", "");
         const memCount = tagmemResult.entries.length;
         const entCount = mentioned.length;
         const parts = [`${memCount} memories`];
