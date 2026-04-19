@@ -410,20 +410,7 @@ export default function (pi) {
     if (!sessionEnriched && event.prompt?.trim()) {
       if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Enriching memory...");
 
-      // Run tagmem search and Neotoma query in parallel with independent error handling
-      const tagmemPromise = (async () => {
-        try {
-          await ensureTagmem();
-          const searchResults = await tagmemClient.search(event.prompt, { limit: 5 });
-          const topEntries = searchResults.entries?.slice(0, 3) || [];
-          const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
-          return { entries: topEntries, bodies };
-        } catch (err) {
-          console.error("[stateful-memory] tagmem enrichment failed:", err.message);
-          return { entries: [], bodies: [] };
-        }
-      })();
-
+      // Neotoma is fast (~900ms) — always run it
       const neotomaPromise = (async () => {
         try {
           const neo = ensureNeotoma();
@@ -438,7 +425,62 @@ export default function (pi) {
         }
       })();
 
-      const [tagmemResult, mentioned] = await Promise.all([tagmemPromise, neotomaPromise]);
+      // tagmem can be slow if the proxy is busy — race against a 15s timer
+      const tagmemPromise = (async () => {
+        try {
+          await ensureTagmem();
+          const searchResults = await tagmemClient.search(event.prompt, { limit: 5 });
+          const topEntries = searchResults.entries?.slice(0, 3) || [];
+          const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
+          return { entries: topEntries, bodies };
+        } catch (err) {
+          console.error("[stateful-memory] tagmem enrichment failed:", err.message);
+          return { entries: [], bodies: [] };
+        }
+      })();
+
+      // Wait for tagmem with interactive timeout
+      let tagmemResult = { entries: [], bodies: [] };
+      const ENRICHMENT_PATIENCE_MS = 15_000;
+
+      const settled = await Promise.race([
+        tagmemPromise.then(r => ({ resolved: true, result: r })),
+        new Promise(resolve => setTimeout(() => resolve({ resolved: false }), ENRICHMENT_PATIENCE_MS)),
+      ]);
+
+      if (settled.resolved) {
+        tagmemResult = settled.result;
+      } else if (ctx.hasUI) {
+        // tagmem is taking long — ask the user if they want to keep waiting
+        let queueInfo = "";
+        try {
+          await ensureTagmem();
+          const qs = await tagmemClient.queueStatus();
+          if (qs.queue_depth > 0) {
+            queueInfo = ` (${qs.queue_depth} save job${qs.queue_depth > 1 ? "s" : ""} in queue)`;
+          }
+        } catch (_) { /* queue status is best-effort */ }
+
+        // Show confirm while tagmem continues running in the background
+        const keepWaiting = await Promise.race([
+          ctx.ui.confirm(
+            "Memory enrichment is slow",
+            `tagmem is still processing${queueInfo}. Keep waiting for memory context?`
+          ),
+          tagmemPromise.then(r => { tagmemResult = r; return "resolved"; }),
+        ]);
+
+        if (keepWaiting === "resolved") {
+          // tagmem resolved while the dialog was shown — use the result
+        } else if (keepWaiting === true) {
+          // User chose to keep waiting
+          if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Still enriching...");
+          tagmemResult = await tagmemPromise;
+        }
+        // else: user chose to skip — tagmemResult stays empty
+      }
+
+      const mentioned = await neotomaPromise;
 
       if (tagmemResult.bodies.length > 0) {
         cachedMemoryContext = tagmemResult.bodies
