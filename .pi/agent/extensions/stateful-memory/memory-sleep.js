@@ -75,18 +75,7 @@ function loadSharedInfra(cwd) {
     existsSync(modelsPath) ? modelsPath : undefined
   );
 
-  // Load real settings so forks inherit defaultProvider/defaultModel
-  const settingsPath = join(AGENT_DIR, "settings.json");
-  let baseSettings = {};
-  try {
-    if (existsSync(settingsPath)) {
-      baseSettings = JSON.parse(
-        readFileSync(settingsPath, "utf-8")
-      );
-    }
-  } catch { /* fall back to empty */ }
-
-  return { authStorage, modelRegistry, baseSettings, cwd };
+  return { authStorage, modelRegistry, cwd };
 }
 
 // ─── Find fallback model ──────────────────────────────────────────────────────
@@ -105,12 +94,13 @@ function findFallbackModel(modelRegistry) {
 // ─── Single fork attempt ──────────────────────────────────────────────────────
 
 async function executeForkAttempt({ task, infra, model }) {
-  const { authStorage, modelRegistry, baseSettings, cwd } = infra;
+  const { authStorage, modelRegistry, cwd } = infra;
 
-  const settingsManager = SettingsManager.inMemory({
-    ...baseSettings,
-    compaction: { enabled: false },
-  });
+  // Use disk-backed settings so the fork inherits defaultProvider/defaultModel
+  // from settings.json. SettingsManager.inMemory() loses these fields, causing
+  // the fork to fall back to Pi's built-in 'anthropic' provider instead of the
+  // custom 'claude' proxy. Compaction is already disabled in settings.json.
+  const settingsManager = SettingsManager.create(cwd, AGENT_DIR);
 
   const resourceLoader = new DefaultResourceLoader({
     cwd,
@@ -134,6 +124,23 @@ async function executeForkAttempt({ task, infra, model }) {
   if (model) sessionOpts.model = model;
 
   const { session: forkSession } = await createAgentSession(sessionOpts);
+
+  // Pi 0.64.0+ requires explicit bindExtensions() to load extensions, register
+  // extension tools, and build the full system prompt. Without this call, the fork
+  // session has no tools from extensions and an incomplete prompt.
+  await forkSession.bindExtensions({
+    commandContextActions: {
+      waitForIdle: () => forkSession.agent.waitForIdle(),
+      newSession: async () => ({ cancelled: true }),
+      fork: async () => ({ cancelled: true }),
+      navigateTree: async () => ({ cancelled: true }),
+      switchSession: async () => ({ cancelled: true }),
+      reload: async () => { await forkSession.reload(); },
+    },
+    onError: (err) => {
+      console.warn(`[sleep] Fork extension error (${err.extensionPath}): ${err.error}`);
+    },
+  });
 
   const sessionFile = forkSession.sessionFile ?? `(in-memory-${Date.now()})`;
   console.log(`[sleep] Fork starting — file: ${sessionFile}`);
@@ -495,10 +502,21 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
     notify(`Phase 3/3: Dream written → ${path.basename(dreamFile)} ✓`);
   }
 
-  return {
-    wakeResult,
-    factsResult,
-    dreamResult,
-    dreamFile,
-  };
+  // ── Report overall status ──────────────────────────────────────────────
+  const results = { wakeResult, factsResult, dreamResult, dreamFile };
+  const failures = [
+    !wakeResult.success && `WAKE.md: ${wakeResult.error}`,
+    !factsResult.success && `FACTS.md: ${factsResult.error}`,
+    !dreamResult.success && `Dreams: ${dreamResult.error}`,
+  ].filter(Boolean);
+
+  if (failures.length > 0) {
+    const msg = `Sleep cycle failed (${failures.length}/3 phases):\n${failures.join("\n")}`;
+    warn(msg);
+    const err = new Error(msg);
+    err.results = results;
+    throw err;
+  }
+
+  return results;
 }
