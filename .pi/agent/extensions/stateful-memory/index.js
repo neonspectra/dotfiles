@@ -8,5 +8,5 @@ export {
 } from "./memory-store.js";
 export { buildMemoryInstructions, buildMemorySection } from "./memory-prompt.js";
 export { loadConfig, resolvePath } from "./config.js";
-export { TagmemClient } from "./tagmem-client.js";
+export { MemstoreClient } from "./memstore-client.js";
 export { NeotomaClient } from "./neotoma-client.js";

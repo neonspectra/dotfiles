@@ -27,7 +27,7 @@ const DEFAULT_CONFIG = {
   topicPersistenceCount: 3,
   topicPreviousMessageMaxChars: 500,
   neotomaDataDir: "/home/monika/.pi/neotoma",
-  tagmemSocketPath: null,
+  memstoreSocketPath: null,
 };
 
 const CONFIG_FILENAME = ".pi/stateful-memory.json";

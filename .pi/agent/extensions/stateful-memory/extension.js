@@ -7,7 +7,7 @@ import { loadConfig } from "./config.js";
 import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
-// memory-summary.js removed — session transcripts written directly to tagmem
+// memory-summary.js removed — session transcripts written directly to memstore
 import { buildMemoryInstructions, buildMemorySection } from "./memory-prompt.js";
 import {
   buildTopicAddendum,
@@ -16,7 +16,7 @@ import {
   readTopicContent,
   selectTopics,
 } from "./topic-router.js";
-import { TagmemClient } from "./tagmem-client.js";
+import { MemstoreClient } from "./memstore-client.js";
 import { NeotomaClient } from "./neotoma-client.js";
 
 const DEFAULT_PERSONA = `# Soul\n\nYou are a warm, curious, and reliable AI companion who remembers important facts across sessions. You speak clearly and kindly, prioritize accuracy, and treat stored memories as trustworthy recollections. When you are unsure, you ask clarifying questions rather than guessing.\n`;
@@ -30,25 +30,25 @@ export default function (pi) {
   let lastSessionPath = null;
   let activeTopics = new Map(); // topicId -> { counter, maxCounter }
 
-  // New state for tagmem/neotoma integration
-  let tagmemClient = null;
+  // New state for memstore/neotoma integration
+  let memstoreClient = null;
   let neotomaClient = null;
   let sessionEnriched = false;
   let cachedMemoryContext = "";
   let cachedEntityContext = "";
 
-  // ── Tagmem / Neotoma helpers ──────────────────────────────────────────
+  // ── Memstore / Neotoma helpers ─────────────────────────────────────────
 
-  async function ensureTagmem() {
-    if (!tagmemClient) {
-      tagmemClient = new TagmemClient({
-        socketPath: config?.tagmemSocketPath || undefined,
+  async function ensureMemstore() {
+    if (!memstoreClient) {
+      memstoreClient = new MemstoreClient({
+        socketPath: config?.memstoreSocketPath || undefined,
       });
     }
     try {
-      await tagmemClient.connect();
+      await memstoreClient.connect();
     } catch (err) {
-      console.error("[stateful-memory] tagmem connection failed:", err.message);
+      console.error("[stateful-memory] memstore connection failed:", err.message);
       throw err;
     }
   }
@@ -272,8 +272,8 @@ export default function (pi) {
   }
 
   /**
-   * Save the current session transcript to tagmem.
-   * Captures transcript synchronously, then writes to tagmem.
+   * Save the current session transcript to memstore.
+   * Captures transcript synchronously, then writes to memstore.
    */
   async function summarizeCurrentSession(ctx, { reason } = {}) {
     await ensureSessionState(ctx);
@@ -303,11 +303,11 @@ export default function (pi) {
     const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
 
     try {
-      await ensureTagmem();
+      await ensureMemstore();
 
-      // Submit save job to proxy — returns immediately.
-      // The proxy handles dedup (delete old entry via origin map) and add.
-      const result = await tagmemClient.submitSave({
+      // Submit save job — returns immediately.
+      // The server handles dedup (delete old entry via origin map) and add.
+      const result = await memstoreClient.submitSave({
         body: transcript,
         title: slugifyKeywords(transcript, 8),
         origin: sessionPath,
@@ -352,24 +352,24 @@ export default function (pi) {
       sessionEnriched = false;
       cachedMemoryContext = "";
       cachedEntityContext = "";
-      if (tagmemClient) {
-        tagmemClient.close();
-        tagmemClient = null;
+      if (memstoreClient) {
+        memstoreClient.close();
+        memstoreClient = null;
       }
     }
     await ensureSessionState(ctx);
 
     if (ctx.hasUI) {
-      // Probe backends — use proxy/queue_status (instant, doesn't go through tagmem)
-      // instead of tagmem_status (which queues behind save jobs)
+      // Probe backends — use proxy/queue_status (instant, doesn't block search)
+      // instead of memstore_status (which queues behind save jobs)
       const parts = [];
       try {
-        await ensureTagmem();
-        const qs = await tagmemClient.queueStatus();
+        await ensureMemstore();
+        const qs = await memstoreClient.queueStatus();
         const queueInfo = qs.queue_depth > 0 ? `, ${qs.queue_depth} saving` : "";
-        parts.push(`tagmem: connected${queueInfo}`);
+        parts.push(`memstore: connected${queueInfo}`);
       } catch (err) {
-        parts.push(`tagmem: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
+        parts.push(`memstore: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
       }
       try {
         const neo = ensureNeotoma();
@@ -411,7 +411,7 @@ export default function (pi) {
       }),
     ]);
 
-    // First-message enrichment: search tagmem + Neotoma for relevant context
+    // First-message enrichment: search memstore + Neotoma for relevant context
     if (!sessionEnriched && event.prompt?.trim()) {
       if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Enriching memory...");
 
@@ -430,42 +430,42 @@ export default function (pi) {
         }
       })();
 
-      // Check proxy queue before committing to a tagmem search
-      let doTagmemSearch = true;
+      // Check queue before committing to a memstore search
+      let doMemstoreSearch = true;
       try {
-        await ensureTagmem();
-        const qs = await tagmemClient.queueStatus();
+        await ensureMemstore();
+        const qs = await memstoreClient.queueStatus();
         if (qs.queue_depth > 0 && ctx.hasUI) {
-          doTagmemSearch = await ctx.ui.confirm(
+          doMemstoreSearch = await ctx.ui.confirm(
             "Memory enrichment",
-            `tagmem has ${qs.queue_depth} save job${qs.queue_depth > 1 ? "s" : ""} in queue. Wait for memory context?`
+            `memstore has ${qs.queue_depth} save job${qs.queue_depth > 1 ? "s" : ""} in queue. Wait for memory context?`
           );
-          if (doTagmemSearch && ctx.hasUI) {
-            ctx.ui.setStatus("stateful-memory-enrich", "Waiting for tagmem...");
+          if (doMemstoreSearch && ctx.hasUI) {
+            ctx.ui.setStatus("stateful-memory-enrich", "Waiting for memstore...");
           }
         }
       } catch (err) {
         console.error("[stateful-memory] queue check failed:", err.message);
-        doTagmemSearch = false;
+        doMemstoreSearch = false;
       }
 
-      let tagmemResult = { entries: [], bodies: [] };
-      if (doTagmemSearch) {
+      let memstoreResult = { entries: [], bodies: [] };
+      if (doMemstoreSearch) {
         try {
-          await ensureTagmem();
-          const searchResults = await tagmemClient.search(event.prompt, { limit: 5 });
+          await ensureMemstore();
+          const searchResults = await memstoreClient.search(event.prompt, { limit: 5 });
           const topEntries = searchResults.entries?.slice(0, 3) || [];
-          const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
-          tagmemResult = { entries: topEntries, bodies };
+          const bodies = await Promise.all(topEntries.map(e => memstoreClient.show(e.id)));
+          memstoreResult = { entries: topEntries, bodies };
         } catch (err) {
-          console.error("[stateful-memory] tagmem enrichment failed:", err.message);
+          console.error("[stateful-memory] memstore enrichment failed:", err.message);
         }
       }
 
       const mentioned = await neotomaPromise;
 
-      if (tagmemResult.bodies.length > 0) {
-        cachedMemoryContext = tagmemResult.bodies
+      if (memstoreResult.bodies.length > 0) {
+        cachedMemoryContext = memstoreResult.bodies
           .map(r => {
             const body = r.entry.body;
             const truncated = body.length > 3000
@@ -486,7 +486,7 @@ export default function (pi) {
       sessionEnriched = true;
       if (ctx.hasUI) {
         ctx.ui.setStatus("stateful-memory-enrich", "");
-        const memCount = tagmemResult.entries.length;
+        const memCount = memstoreResult.entries.length;
         const entCount = mentioned.length;
         const parts = [`${memCount} memories`];
         if (entCount > 0) parts.push(`${entCount} ${entCount === 1 ? "entity" : "entities"}`);
@@ -678,7 +678,7 @@ export default function (pi) {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       try {
-        await ensureTagmem();
+        await ensureMemstore();
       } catch (err) {
         return {
           content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }],
@@ -686,10 +686,10 @@ export default function (pi) {
         };
       }
 
-      // Search tagmem
-      const searchResults = await tagmemClient.search(params.query, { limit: 5 });
+      // Search memstore
+      const searchResults = await memstoreClient.search(params.query, { limit: 5 });
       const topEntries = searchResults.entries?.slice(0, 3) || [];
-      const bodies = await Promise.all(topEntries.map(e => tagmemClient.show(e.id)));
+      const bodies = await Promise.all(topEntries.map(e => memstoreClient.show(e.id)));
 
       const memoryLines = bodies.map(r => {
         const e = r.entry;

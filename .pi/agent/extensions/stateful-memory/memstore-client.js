@@ -1,12 +1,12 @@
 /**
- * TagmemClient — MCP client for the tagmem semantic memory store.
+ * MemstoreClient — MCP client for the memstore semantic memory store.
  *
- * Connects to the tagmem proxy over a Unix domain socket using JSON-RPC 2.0
+ * Connects to the memstore server over a Unix domain socket using JSON-RPC 2.0
  * (newline-delimited JSON). Handles the MCP initialize handshake automatically.
  *
  * @example
  * ```js
- * const client = new TagmemClient();
+ * const client = new MemstoreClient();
  * await client.connect();
  * const results = await client.search('memory system', { limit: 5 });
  * const entry = await client.show(results.entries[0].id);
@@ -17,12 +17,12 @@
 import net from "node:net";
 
 const DEFAULT_SOCKET_PATH =
-  (process.env.XDG_RUNTIME_DIR || "/run/user/1002") + "/tagmem.sock";
+  (process.env.XDG_RUNTIME_DIR || "/run/user/1002") + "/memstore.sock";
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const WRITE_TIMEOUT_MS = 180_000;  // add/delete can queue behind other ops
 
-export class TagmemClient {
+export class MemstoreClient {
   /** @type {string} */
   #socketPath;
   /** @type {net.Socket|null} */
@@ -38,14 +38,14 @@ export class TagmemClient {
 
   /**
    * @param {object} [opts]
-   * @param {string} [opts.socketPath] — Unix socket path (defaults to $XDG_RUNTIME_DIR/tagmem.sock)
+   * @param {string} [opts.socketPath] — Unix socket path (defaults to $XDG_RUNTIME_DIR/memstore.sock)
    */
   constructor(opts = {}) {
     this.#socketPath = opts.socketPath || DEFAULT_SOCKET_PATH;
   }
 
   /**
-   * Connect to the tagmem proxy and complete the MCP initialize handshake.
+   * Connect to the memstore server and complete the MCP initialize handshake.
    * @returns {Promise<object>} The server's initialize result (capabilities, serverInfo, etc.)
    */
   async connect() {
@@ -76,7 +76,7 @@ export class TagmemClient {
   }
 
   /**
-   * Search tagmem entries by semantic similarity.
+   * Search memstore entries by semantic similarity.
    * @param {string} query — Search query text
    * @param {object} [opts]
    * @param {number} [opts.depth] — Filter by depth level
@@ -86,7 +86,7 @@ export class TagmemClient {
    */
   async search(query, opts = {}) {
     const args = { query, ...opts };
-    return this.#callTool("tagmem_search", args);
+    return this.#callTool("memstore_search", args);
   }
 
   /**
@@ -95,12 +95,12 @@ export class TagmemClient {
    * @returns {Promise<{entry: object}>}
    */
   async show(id) {
-    return this.#callTool("tagmem_show_entry", { id });
+    return this.#callTool("memstore_show_entry", { id });
   }
 
   /**
-   * Submit a session save job to the proxy. Returns immediately.
-   * The proxy handles dedup (delete old entry) and add in the background.
+   * Submit a session save job to the server. Returns immediately.
+   * The server handles dedup (delete old entry) and add in the background.
    * @param {object} params
    * @param {string} params.body — Normalized transcript
    * @param {string} params.origin — Session path (dedup key)
@@ -114,7 +114,7 @@ export class TagmemClient {
   }
 
   /**
-   * Get the proxy's save queue status.
+   * Get the server's save queue status.
    * @returns {Promise<{queue_depth: number, jobs: object[]}>}
    */
   async queueStatus() {
@@ -122,7 +122,7 @@ export class TagmemClient {
   }
 
   /**
-   * Add a new entry to the tagmem store.
+   * Add a new entry to the memstore.
    * @param {object} entry
    * @param {string} entry.title
    * @param {string} entry.body
@@ -133,7 +133,7 @@ export class TagmemClient {
    * @returns {Promise<{entry: object}>}
    */
   async add(entry) {
-    return this.#callTool("tagmem_add_entry", entry, { timeoutMs: WRITE_TIMEOUT_MS });
+    return this.#callTool("memstore_add_entry", entry, { timeoutMs: WRITE_TIMEOUT_MS });
   }
 
   /**
@@ -141,7 +141,7 @@ export class TagmemClient {
    * @returns {Promise<object>}
    */
   async status() {
-    return this.#callTool("tagmem_status", {});
+    return this.#callTool("memstore_status", {});
   }
 
   /**
@@ -153,7 +153,7 @@ export class TagmemClient {
    * @returns {Promise<{entries: object[]}>}
    */
   async list(opts = {}) {
-    return this.#callTool("tagmem_list_entries", opts);
+    return this.#callTool("memstore_list_entries", opts);
   }
 
   /**
@@ -162,7 +162,7 @@ export class TagmemClient {
    * @returns {Promise<object>}
    */
   async deleteEntry(id) {
-    return this.#callTool("tagmem_delete_entry", { id }, { timeoutMs: WRITE_TIMEOUT_MS });
+    return this.#callTool("memstore_delete_entry", { id }, { timeoutMs: WRITE_TIMEOUT_MS });
   }
 
   /**
@@ -200,7 +200,7 @@ export class TagmemClient {
     if (result.isError) {
       const msg =
         result.content?.[0]?.text || JSON.stringify(result.content) || "Unknown tool error";
-      throw new Error(`tagmem tool error (${toolName}): ${msg}`);
+      throw new Error(`memstore tool error (${toolName}): ${msg}`);
     }
 
     // Prefer structuredContent (already parsed), fall back to parsing content[0].text
@@ -228,7 +228,7 @@ export class TagmemClient {
       const id = this.#nextId++;
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        reject(new Error(`tagmem request timeout (${method}, id=${id})`));
+        reject(new Error(`memstore request timeout (${method}, id=${id})`));
       }, timeoutMs);
 
       this.#pending.set(id, { resolve, reject, timer });
@@ -242,7 +242,7 @@ export class TagmemClient {
    */
   #send(msg) {
     if (!this.#socket || this.#socket.destroyed) {
-      throw new Error("tagmem socket not connected");
+      throw new Error("memstore socket not connected");
     }
     this.#socket.write(JSON.stringify(msg) + "\n");
   }
@@ -273,7 +273,7 @@ export class TagmemClient {
 
         if (msg.error) {
           pending.reject(
-            new Error(`tagmem RPC error: ${msg.error.message || JSON.stringify(msg.error)}`)
+            new Error(`memstore RPC error: ${msg.error.message || JSON.stringify(msg.error)}`)
           );
         } else {
           pending.resolve(msg.result);
@@ -303,4 +303,4 @@ export class TagmemClient {
   }
 }
 
-export default TagmemClient;
+export default MemstoreClient;
