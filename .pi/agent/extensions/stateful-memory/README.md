@@ -40,6 +40,11 @@ The save flow:
 4. Submit to memstore proxy (body, title, origin, tags, depth)
 5. Update recency index (`recent-sessions.json`)
 
+The memstore save job processor extracts the session date from the `# Date:` header
+in the transcript body and uses it as `created_at`. This means re-saving a resumed
+session preserves the original date. `updated_at` reflects when the entry was last
+written.
+
 ### Entity State (Neotoma)
 
 The `remember` tool writes observations to Neotoma's append-only store. Each observation
@@ -80,6 +85,8 @@ which keys get path-resolved.
 
 Searches memstore (FTS5 full-text) and Neotoma (entity search) for content matching a
 query. Returns top 3 memory entries with full bodies, plus any matching entity snapshots.
+Results include the session date (extracted from the `# Date:` header in the transcript)
+so that conflicting information from different time periods can be distinguished.
 
 ### `remember` — Store observations
 
