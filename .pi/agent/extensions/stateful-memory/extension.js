@@ -293,8 +293,11 @@ export default function (pi) {
 
     // Skip empty or trivial sessions (less than 200 chars of content)
     if (!transcript || transcript.length < 200) {
+      if (ctx.hasUI) ctx.ui.notify("Session too short to save.", "info");
       return null;
     }
+
+    if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
 
     const tags = determineSessionTags(transcript, activeTopics);
     const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
@@ -511,7 +514,6 @@ export default function (pi) {
   });
 
   pi.on("session_before_switch", async (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
     await summarizeCurrentSession(ctx, { reason: "session-switch" });
   });
 
@@ -519,7 +521,6 @@ export default function (pi) {
   // shutdown summary; fork sessions get their own independent lifecycle.
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
     await summarizeCurrentSession(ctx, { reason: "session-shutdown" });
   });
 
