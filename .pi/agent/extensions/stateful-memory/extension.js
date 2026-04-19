@@ -357,12 +357,14 @@ export default function (pi) {
     await ensureSessionState(ctx);
 
     if (ctx.hasUI) {
-      // Probe backends async — don't block session start
+      // Probe backends — use proxy/queue_status (instant, doesn't go through tagmem)
+      // instead of tagmem_status (which queues behind save jobs)
       const parts = [];
       try {
         await ensureTagmem();
-        const st = await tagmemClient.status();
-        parts.push(`tagmem: ${st.total_entries} entries`);
+        const qs = await tagmemClient.queueStatus();
+        const queueInfo = qs.queue_depth > 0 ? `, ${qs.queue_depth} saving` : "";
+        parts.push(`tagmem: connected${queueInfo}`);
       } catch (err) {
         parts.push(`tagmem: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
       }
