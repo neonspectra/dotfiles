@@ -71,7 +71,7 @@ export function slugifyKeywords(text, maxWords = 6) {
   return keywords.length > 0 ? keywords.join("-") : "untitled";
 }
 
-// ── OBSERVATIONS.md render ──────────────────────────────────────────────────
+// ── Entity context render ────────────────────────────────────────────────────
 
 const TYPE_ORDER = ["sophont", "project", "decision", "environment", "preference", "self"];
 const TYPE_LABELS = {
@@ -82,64 +82,148 @@ const TYPE_LABELS = {
   preference: "Preferences",
   self: "Self",
 };
-const MAX_OBS_PER_ENTITY = 10;
 
 /**
- * Render all Neotoma entity snapshots to a markdown file.
- * Deterministic — produces the same output for the same entity state.
+ * Render entity context from memstore observations + entity-index.json.
+ * Produces a markdown file with recent observations and entity awareness.
  *
- * @param {import('./neotoma-client.js').NeotomaClient} neotomaClient
+ * @param {import('./memstore-client.js').MemstoreClient} memstoreClient
+ * @param {string} entityIndexPath — path to entity-index.json
  * @param {string} outputPath — path to write OBSERVATIONS.md
  * @returns {Promise<string>} the rendered content
  */
-export async function renderObservations(neotomaClient, outputPath) {
-  const { entities } = await neotomaClient.listEntities();
+export async function renderEntityContext(memstoreClient, entityIndexPath, outputPath) {
+  // Load entity index
+  let entityIndex = {};
+  try {
+    const raw = await fs.readFile(entityIndexPath, "utf8");
+    entityIndex = JSON.parse(raw);
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error("[stateful-memory] Failed to read entity-index.json:", err.message);
+    }
+  }
 
-  // Group by entity type
-  const groups = new Map();
-  for (const entity of entities) {
-    const type = entity.entity_type;
-    if (!groups.has(type)) groups.set(type, []);
-    groups.get(type).push(entity);
+  // Fetch recent observations from memstore
+  let recentObs = [];
+  try {
+    const result = await memstoreClient.listObservations({ limit: 15 });
+    recentObs = result.observations || [];
+  } catch (err) {
+    console.error("[stateful-memory] Failed to list observations:", err.message);
   }
 
   const sections = [];
   sections.push("# Entity Observations");
   sections.push("");
-  sections.push("*Rendered from Neotoma entity store. Regenerated on every session start.*");
+  sections.push("*Rendered from memstore observation store. Regenerated on every session start.*");
 
-  // Render in defined order, then any unknown types
-  const orderedTypes = [...TYPE_ORDER];
-  for (const type of groups.keys()) {
-    if (!orderedTypes.includes(type)) orderedTypes.push(type);
-  }
+  // ── Part 1: Recent observations (last 15) ──
+  if (recentObs.length > 0) {
+    // Group recent observations by entity type for readability
+    const recentByType = new Map();
+    const recentEntityKeys = new Set();
+    for (const obs of recentObs) {
+      const type = obs.entity_type;
+      if (!recentByType.has(type)) recentByType.set(type, []);
+      recentByType.get(type).push(obs);
+      recentEntityKeys.add(`${type}:${obs.entity_name}`);
+    }
 
-  for (const type of orderedTypes) {
-    const entities = groups.get(type);
-    if (!entities || entities.length === 0) continue;
+    // Render in defined order, then any unknown types
+    const orderedTypes = [...TYPE_ORDER];
+    for (const type of recentByType.keys()) {
+      if (!orderedTypes.includes(type)) orderedTypes.push(type);
+    }
 
-    const label = TYPE_LABELS[type] || type.charAt(0).toUpperCase() + type.slice(1);
-    sections.push("");
-    sections.push(`## ${label}`);
+    for (const type of orderedTypes) {
+      const observations = recentByType.get(type);
+      if (!observations || observations.length === 0) continue;
 
-    // Sort entities alphabetically by name
-    entities.sort((a, b) => a.canonical_name.localeCompare(b.canonical_name));
+      const label = TYPE_LABELS[type] || type.charAt(0).toUpperCase() + type.slice(1);
+      sections.push("");
+      sections.push(`## ${label}`);
 
-    for (const entity of entities) {
-      const obs = entity.snapshot?.observations;
-      if (!obs || obs.length === 0) {
-        sections.push(`\n- **${entity.canonical_name}** *(no observations recorded)*`);
-        continue;
+      // Group by entity name within type
+      const byName = new Map();
+      for (const obs of observations) {
+        if (!byName.has(obs.entity_name)) byName.set(obs.entity_name, []);
+        byName.get(obs.entity_name).push(obs);
       }
 
-      sections.push(`\n### ${entity.canonical_name}`);
-      const shown = obs.slice(0, MAX_OBS_PER_ENTITY);
-      for (const o of shown) {
-        sections.push(`- ${o}`);
+      for (const [name, obs] of byName) {
+        sections.push(`\n### ${name}`);
+        for (const o of obs) {
+          // Truncate long observations to ~150 chars
+          const body = o.body.length > 150
+            ? o.body.slice(0, 147) + "..."
+            : o.body;
+          sections.push(`- ${body}`);
+        }
       }
-      if (obs.length > MAX_OBS_PER_ENTITY) {
-        sections.push(`- *(${obs.length - MAX_OBS_PER_ENTITY} more observations...)*`);
+    }
+
+    // ── Part 2: Entity awareness (entities not already shown) ──
+    const unseenEntities = Object.entries(entityIndex)
+      .filter(([key]) => !recentEntityKeys.has(key))
+      .map(([, entry]) => entry);
+
+    if (unseenEntities.length > 0) {
+      sections.push("");
+      sections.push("## Other Known Entities");
+      sections.push("");
+
+      // Sort by last_observed descending
+      unseenEntities.sort((a, b) => {
+        const da = Date.parse(a.last_observed) || 0;
+        const db = Date.parse(b.last_observed) || 0;
+        return db - da;
+      });
+
+      for (const ent of unseenEntities) {
+        const typeLabel = TYPE_LABELS[ent.entity_type] || ent.entity_type;
+        const date = ent.last_observed
+          ? new Date(ent.last_observed).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+          : "unknown";
+        sections.push(`- **${ent.entity_name}** (${typeLabel}) — ${ent.count} obs, last ${date}`);
       }
+    }
+  } else {
+    // No recent observations — just render full entity awareness
+    const allEntities = Object.values(entityIndex);
+    if (allEntities.length > 0) {
+      // Group by type
+      const groups = new Map();
+      for (const ent of allEntities) {
+        if (!groups.has(ent.entity_type)) groups.set(ent.entity_type, []);
+        groups.get(ent.entity_type).push(ent);
+      }
+
+      const orderedTypes = [...TYPE_ORDER];
+      for (const type of groups.keys()) {
+        if (!orderedTypes.includes(type)) orderedTypes.push(type);
+      }
+
+      for (const type of orderedTypes) {
+        const entities = groups.get(type);
+        if (!entities || entities.length === 0) continue;
+
+        const label = TYPE_LABELS[type] || type.charAt(0).toUpperCase() + type.slice(1);
+        sections.push("");
+        sections.push(`## ${label}`);
+        sections.push("");
+
+        entities.sort((a, b) => a.entity_name.localeCompare(b.entity_name));
+        for (const ent of entities) {
+          const date = ent.last_observed
+            ? new Date(ent.last_observed).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+            : "unknown";
+          sections.push(`- **${ent.entity_name}** — ${ent.count} obs, last ${date}`);
+        }
+      }
+    } else {
+      sections.push("");
+      sections.push("*(No observations recorded yet.)*");
     }
   }
 

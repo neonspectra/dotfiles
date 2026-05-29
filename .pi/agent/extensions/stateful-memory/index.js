@@ -9,4 +9,3 @@ export {
 export { buildMemoryInstructions, buildMemorySection } from "./memory-prompt.js";
 export { loadConfig, resolvePath } from "./config.js";
 export { MemstoreClient } from "./memstore-client.js";
-export { NeotomaClient } from "./neotoma-client.js";

@@ -26,7 +26,6 @@ const DEFAULT_CONFIG = {
   topicsFile: "stateful-memory/PERSONALITY_MATRIX.md",
   topicPersistenceCount: 3,
   topicPreviousMessageMaxChars: 500,
-  neotomaDataDir: "/home/monika/.pi/neotoma",
   memstoreSocketPath: null,
 };
 

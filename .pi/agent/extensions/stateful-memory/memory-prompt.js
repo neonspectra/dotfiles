@@ -4,7 +4,6 @@ export function buildMemorySection({
   wakeContext,
   observations,
   enrichedContext,
-  entityContext,
 }) {
   const sections = [];
 
@@ -28,10 +27,6 @@ export function buildMemorySection({
     sections.push(`### Relevant Memory Context\n${enrichedContext.trim()}`);
   }
 
-  if (entityContext?.trim()) {
-    sections.push(`### Entity State\n${entityContext.trim()}`);
-  }
-
   if (sections.length === 0) {
     return "";
   }
@@ -46,7 +41,7 @@ export function buildMemoryInstructions() {
     "- Treat stored memories as your own recollection and let them shape replies naturally.",
     '- Use "remember" whenever a durable fact surfaces — project state changes, decisions, new information about people, environment changes.',
     '- Use "remember" when something contradicts your existing knowledge — supersede or correct stale observations.',
-    "- Neotoma handles deduplication and conflict resolution, so remembering redundantly is better than forgetting.",
+    "- Session transcripts are saved automatically. Use remember for durable facts that should surface independently of the session they occurred in.",
     '- Use "recall" when you need to search session summaries or dig into past session logs.',
     "- If you are unsure about a fact, try \"recall\" before saying you don't know.",
     "- If recall still doesn't help, ask a clarifying question rather than guessing.",

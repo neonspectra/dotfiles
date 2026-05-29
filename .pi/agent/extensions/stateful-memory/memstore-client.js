@@ -165,6 +165,57 @@ export class MemstoreClient {
     return this.#callTool("memstore_delete_entry", { id }, { timeoutMs: WRITE_TIMEOUT_MS });
   }
 
+  // ── Observation methods ──
+
+  /**
+   * Add an observation to the entity store.
+   * @param {object} params
+   * @param {string} params.entity_type — e.g. "sophont", "project", "self"
+   * @param {string} params.entity_name — e.g. "Neon", "TheZetaDirective"
+   * @param {string} params.body — Observation text
+   * @param {string[]} [params.tags] — Optional tags
+   * @param {string} [params.created_at] — Optional ISO timestamp
+   * @returns {Promise<{observation: {id: number, entity_type: string, entity_name: string}}>}
+   */
+  async addObservation(params) {
+    return this.#callTool("memstore_add_observation", params, { timeoutMs: WRITE_TIMEOUT_MS });
+  }
+
+  /**
+   * Search observations by semantic similarity.
+   * @param {string} query — Search query text
+   * @param {object} [opts]
+   * @param {string} [opts.entity_type] — Filter by entity type
+   * @param {string} [opts.entity_name] — Filter by entity name
+   * @param {number} [opts.limit] — Max results
+   * @returns {Promise<{observations: Array<{id: number, entity_type: string, entity_name: string, body: string, tags: string[], created_at: string, score: number}>}>}
+   */
+  async searchObservations(query, opts = {}) {
+    return this.#callTool("memstore_search_observations", { query, ...opts });
+  }
+
+  /**
+   * List observations with optional filtering.
+   * @param {object} [opts]
+   * @param {string} [opts.entity_type] — Filter by entity type
+   * @param {string} [opts.entity_name] — Filter by entity name
+   * @param {number} [opts.limit] — Max results
+   * @param {number} [opts.offset] — Offset for pagination
+   * @returns {Promise<{observations: Array<{id: number, entity_type: string, entity_name: string, body: string, tags: string[], created_at: string}>, total: number}>}
+   */
+  async listObservations(opts = {}) {
+    return this.#callTool("memstore_list_observations", opts);
+  }
+
+  /**
+   * Delete an observation by ID.
+   * @param {number} id — Observation ID
+   * @returns {Promise<{deleted: boolean, id: number}>}
+   */
+  async deleteObservation(id) {
+    return this.#callTool("memstore_delete_observation", { id }, { timeoutMs: WRITE_TIMEOUT_MS });
+  }
+
   /**
    * Close the connection and reject any pending requests.
    */

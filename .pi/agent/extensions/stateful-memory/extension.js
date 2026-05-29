@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
 import { loadConfig } from "./config.js";
-import { MemoryStore, slugifyKeywords, renderObservations, updateRecencyIndex } from "./memory-store.js";
+import { MemoryStore, slugifyKeywords, renderEntityContext, updateRecencyIndex } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
 // memory-summary.js removed — session transcripts written directly to memstore
@@ -17,7 +17,6 @@ import {
   selectTopics,
 } from "./topic-router.js";
 import { MemstoreClient } from "./memstore-client.js";
-import { NeotomaClient } from "./neotoma-client.js";
 
 const DEFAULT_PERSONA = `# Soul\n\nYou are a warm, curious, and reliable AI companion who remembers important facts across sessions. You speak clearly and kindly, prioritize accuracy, and treat stored memories as trustworthy recollections. When you are unsure, you ask clarifying questions rather than guessing.\n`;
 
@@ -30,14 +29,12 @@ export default function (pi) {
   let lastSessionPath = null;
   let activeTopics = new Map(); // topicId -> { counter, maxCounter }
 
-  // New state for memstore/neotoma integration
+  // New state for memstore integration
   let memstoreClient = null;
-  let neotomaClient = null;
   let sessionEnriched = false;
   let cachedMemoryContext = "";
-  let cachedEntityContext = "";
 
-  // ── Memstore / Neotoma helpers ─────────────────────────────────────────
+  // ── Memstore helpers ───────────────────────────────────────────────────
 
   async function ensureMemstore() {
     if (!memstoreClient) {
@@ -53,13 +50,37 @@ export default function (pi) {
     }
   }
 
-  function ensureNeotoma() {
-    if (!neotomaClient) {
-      neotomaClient = new NeotomaClient({
-        dataDir: config?.neotomaDataDir || "/home/monika/.pi/neotoma",
-      });
+  // ── Entity index helpers ──────────────────────────────────────────────
+
+  function getEntityIndexPath() {
+    return path.join(path.dirname(config.factsFile), "entity-index.json");
+  }
+
+  async function readEntityIndex() {
+    try {
+      const raw = await fs.readFile(getEntityIndexPath(), "utf8");
+      return JSON.parse(raw);
+    } catch (err) {
+      if (err.code === "ENOENT") return {};
+      console.error("[stateful-memory] Failed to read entity-index.json:", err.message);
+      return {};
     }
-    return neotomaClient;
+  }
+
+  async function writeEntityIndex(index) {
+    const indexPath = getEntityIndexPath();
+    await fs.mkdir(path.dirname(indexPath), { recursive: true });
+    await fs.writeFile(indexPath, JSON.stringify(index, null, 2), "utf8");
+  }
+
+  async function updateEntityIndex(entityType, entityName, observationCount) {
+    const index = await readEntityIndex();
+    const key = `${entityType}:${entityName}`;
+    const existing = index[key] || { entity_type: entityType, entity_name: entityName, count: 0, last_observed: null };
+    existing.count += observationCount;
+    existing.last_observed = new Date().toISOString();
+    index[key] = existing;
+    await writeEntityIndex(index);
   }
 
   // ── Date extraction helpers ───────────────────────────────────────
@@ -204,7 +225,6 @@ export default function (pi) {
       wakeContext,
       observations,
       enrichedContext: cachedMemoryContext,
-      entityContext: cachedEntityContext,
     });
 
     const instructions = buildMemoryInstructions();
@@ -334,7 +354,6 @@ export default function (pi) {
     if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
 
     const tags = determineSessionTags(transcript, activeTopics);
-    const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
 
     try {
       await ensureMemstore();
@@ -385,7 +404,6 @@ export default function (pi) {
       activeTopics = new Map();
       sessionEnriched = false;
       cachedMemoryContext = "";
-      cachedEntityContext = "";
       if (memstoreClient) {
         memstoreClient.close();
         memstoreClient = null;
@@ -405,22 +423,26 @@ export default function (pi) {
       } catch (err) {
         parts.push(`memstore: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
       }
+
+      // Report observation count from entity index
       try {
-        const neo = ensureNeotoma();
-        const { total } = await neo.listEntities();
-        parts.push(`neotoma: ${total} entities`);
+        const index = await readEntityIndex();
+        const entityCount = Object.keys(index).length;
+        parts.push(`entities: ${entityCount}`);
       } catch (err) {
-        parts.push(`neotoma: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
+        parts.push(`entities: ✗`);
       }
+
       const allOk = parts.every(p => !p.includes("✗"));
       const label = allOk ? "Memory: ready" : "Memory: degraded";
       ctx.ui.setStatus("stateful-memory", `${label} (${parts.join(" | ")})`);
     }
 
-    // Render OBSERVATIONS.md from Neotoma on session start
+    // Render OBSERVATIONS.md from memstore observations + entity index
     try {
-      const neo = ensureNeotoma();
-      await renderObservations(neo, config.observationsFile);
+      await ensureMemstore();
+      const entityIndexPath = getEntityIndexPath();
+      await renderEntityContext(memstoreClient, entityIndexPath, config.observationsFile);
     } catch (err) {
       console.error("[stateful-memory] OBSERVATIONS.md render failed:", err.message);
     }
@@ -445,24 +467,9 @@ export default function (pi) {
       }),
     ]);
 
-    // First-message enrichment: search memstore + Neotoma for relevant context
+    // First-message enrichment: search memstore for relevant context
     if (!sessionEnriched && event.prompt?.trim()) {
       if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Enriching memory...");
-
-      // Neotoma is always fast (~900ms) — run unconditionally
-      const neotomaPromise = (async () => {
-        try {
-          const neo = ensureNeotoma();
-          const { entities: allEntities } = await neo.listEntities();
-          const queryLower = event.prompt.toLowerCase();
-          return (allEntities || []).filter(e =>
-            queryLower.includes(e.canonical_name.toLowerCase())
-          );
-        } catch (err) {
-          console.error("[stateful-memory] neotoma enrichment failed:", err.message);
-          return [];
-        }
-      })();
 
       // Check queue before committing to a memstore search
       let doMemstoreSearch = true;
@@ -496,8 +503,6 @@ export default function (pi) {
         }
       }
 
-      const mentioned = await neotomaPromise;
-
       if (memstoreResult.bodies.length > 0) {
         cachedMemoryContext = memstoreResult.bodies
           .map(r => {
@@ -512,21 +517,11 @@ export default function (pi) {
           .join("\n\n---\n\n");
       }
 
-      if (mentioned.length > 0) {
-        cachedEntityContext = mentioned.map(e => {
-          const snap = e.snapshot ? JSON.stringify(e.snapshot, null, 2) : "(no snapshot)";
-          return `**${e.canonical_name}** (${e.entity_type}):\n${snap}`;
-        }).join("\n\n");
-      }
-
       sessionEnriched = true;
       if (ctx.hasUI) {
         ctx.ui.setStatus("stateful-memory-enrich", "");
         const memCount = memstoreResult.entries.length;
-        const entCount = mentioned.length;
-        const parts = [`${memCount} memories`];
-        if (entCount > 0) parts.push(`${entCount} ${entCount === 1 ? "entity" : "entities"}`);
-        ctx.ui.notify(`Memory enriched: ${parts.join(", ")}.`, "info");
+        ctx.ui.notify(`Memory enriched: ${memCount} memories.`, "info");
       }
     }
 
@@ -635,8 +630,6 @@ export default function (pi) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const neo = ensureNeotoma();
-
       // Entity name defaults
       const DEFAULTS = {
         person: "Neon",
@@ -653,20 +646,36 @@ export default function (pi) {
         "zeta directive": "TheZetaDirective",
       };
 
-      // Map tool-facing target types to Neotoma entity types
-      const NEOTOMA_TYPE_MAP = { person: "sophont" };
-      const neotomaType = NEOTOMA_TYPE_MAP[params.target] || params.target;
+      // Map tool-facing target types to stored entity types
+      // Keeps compatibility with migrated Neotoma data (person→sophont)
+      const TYPE_MAP = { person: "sophont" };
+      const entityType = TYPE_MAP[params.target] || params.target;
 
       let entityName = params.name?.trim() || DEFAULTS[params.target] || params.target;
       const normalized = entityName.toLowerCase();
       if (ALIASES[normalized]) entityName = ALIASES[normalized];
 
       try {
-        await neo.storeObservations([{
-          entity_type: neotomaType,
-          name: entityName,
-          observations: params.items,
-        }]);
+        await ensureMemstore();
+
+        // Store each observation item as a separate observation in memstore
+        const results = [];
+        for (const item of params.items) {
+          const result = await memstoreClient.addObservation({
+            entity_type: entityType,
+            entity_name: entityName,
+            body: item,
+            tags: params.tags || [],
+          });
+          results.push(result);
+        }
+
+        // Update local entity index
+        try {
+          await updateEntityIndex(entityType, entityName, params.items.length);
+        } catch (indexErr) {
+          console.error("[stateful-memory] entity-index update failed:", indexErr.message);
+        }
 
         return {
           content: [{ type: "text", text: `Stored ${params.items.length} observation(s) for ${params.target}:${entityName}.` }],
@@ -722,7 +731,7 @@ export default function (pi) {
         };
       }
 
-      // Search memstore
+      // Search memstore sessions
       const searchResults = await memstoreClient.search(params.query, { limit: 5 });
       const topEntries = searchResults.entries?.slice(0, 3) || [];
       const bodies = await Promise.all(topEntries.map(e => memstoreClient.show(e.id)));
@@ -734,28 +743,33 @@ export default function (pi) {
         return `### ${e.title}\n*${dateLabel} | depth ${e.depth} | tags: ${(e.tags || []).join(", ")}*\n\n${e.body}`;
       });
 
-      // Search Neotoma for entity matches
-      let entitySection = "";
+      // Search memstore observations
+      let observationSection = "";
       try {
-        const neo = ensureNeotoma();
-        const entityResults = await neo.searchEntities(params.query);
-        if (entityResults.entities?.length > 0) {
-          entitySection = "\n\n## Entity State\n\n" + entityResults.entities.slice(0, 3).map(e => {
-            const snap = e.snapshot ? JSON.stringify(e.snapshot, null, 2) : "(no data)";
-            return `**${e.canonical_name}** (${e.entity_type}):\n${snap}`;
-          }).join("\n\n");
+        const obsResults = await memstoreClient.searchObservations(params.query, { limit: 5 });
+        const observations = obsResults.observations || [];
+        if (observations.length > 0) {
+          const obsLines = observations.map(o => {
+            const date = o.created_at
+              ? new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+              : "unknown";
+            return `**${o.entity_name}** (${o.entity_type}) — *${date}*\n${o.body}`;
+          });
+          observationSection = "\n\n## Recalled Observations\n\n" + obsLines.join("\n\n---\n\n");
         }
       } catch (err) {
-        console.error("[stateful-memory] neotoma search failed:", err.message);
+        console.error("[stateful-memory] observation search failed:", err.message);
       }
 
       const text = memoryLines.length > 0
-        ? `## Recalled Memories\n\n${memoryLines.join("\n\n---\n\n")}${entitySection}`
-        : `No relevant memories found.${entitySection}`;
+        ? `## Recalled Sessions\n\n${memoryLines.join("\n\n---\n\n")}${observationSection}`
+        : observationSection
+          ? observationSection.trim()
+          : "No relevant memories found.";
 
       return {
         content: [{ type: "text", text }],
-        details: { entries: topEntries, entitySection: Boolean(entitySection) },
+        details: { entries: topEntries, hasObservations: Boolean(observationSection) },
       };
     },
   });
