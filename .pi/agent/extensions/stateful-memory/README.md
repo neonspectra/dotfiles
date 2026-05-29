@@ -1,7 +1,7 @@
 # Stateful Memory — Extension Reference
 
 The `stateful-memory` extension gives Pi persistent identity across sessions. It manages
-persona injection, memory retrieval, entity state, topic routing, and the sleep cycle.
+persona injection, memory retrieval, entity observations, topic routing, and the sleep cycle.
 
 ## How It Works
 
@@ -12,10 +12,9 @@ On every turn (`before_agent_start`), the extension builds the system prompt add
 1. **Persona** — SOUL.md + STYLE.md + REGISTER.md + SLEEP.md
 2. **Current Context** — WAKE.md (orientation from last sleep cycle)
 3. **Pinned Facts** — FACTS.md (foundational grounding)
-4. **Observations** — OBSERVATIONS.md (Neotoma entity snapshots, rendered on session start)
+4. **Entity Context** — Recent observations + entity awareness index (rendered on session start)
 5. **Memory Context** — enrichment results from memstore (first message only)
-6. **Entity Context** — Neotoma entities mentioned in the prompt (first message only)
-7. **Topic Addenda** — 0–3 topic files selected by the topic router
+6. **Topic Addenda** — 0–3 topic files selected by the topic router
 
 ### Memory Enrichment (First Message)
 
@@ -24,8 +23,7 @@ When the first user message arrives:
 1. Check memstore queue depth — if save jobs are pending, ask whether to wait
 2. Search memstore with the user's prompt (natural language → FTS5 query)
 3. Fetch top 3 results, truncate bodies to 3000 chars each
-4. Search Neotoma for entities whose names appear in the prompt
-5. Cache both results — they're included in the system prompt for the rest of the session
+4. Cache results — they're included in the system prompt for the rest of the session
 
 ### Session Saves
 
@@ -45,15 +43,20 @@ in the transcript body and uses it as `created_at`. This means re-saving a resum
 session preserves the original date. `updated_at` reflects when the entry was last
 written.
 
-### Entity State (Neotoma)
+### Entity Observations (memstore)
 
-The `remember` tool writes observations to Neotoma's append-only store. Each observation
-is associated with an entity (person, project, decision, preference, environment, self).
-Neotoma's reducer computes current snapshots from the observation history.
+The `remember` tool writes observations to memstore's `observations` table — a separate
+FTS5-indexed table distinct from session transcripts. Each observation is associated with
+an entity (person, project, decision, preference, environment, self).
 
-OBSERVATIONS.md is rendered from all Neotoma entity snapshots on every session start
-(~900ms). It's grouped by entity type, capped at 10 observations per entity, and
-gitignored — it's regenerated, never manually edited.
+On session start, the entity context is rendered from two sources:
+- **Recent observations** — the 15 most recent observations from memstore, grouped by
+  entity type and name, with bodies truncated to ~150 chars
+- **Entity awareness** — a compact listing of all known entities from `entity-index.json`,
+  showing name, type, count, and last observation date
+
+The `entity-index.json` file is a local cache maintained by the remember tool. If lost,
+it can be rebuilt from memstore. It lives at `~/.pi/stateful-memory/entity-index.json`.
 
 ## Configuration
 
@@ -67,11 +70,10 @@ Config is loaded from `~/.pi/agent/stateful-memory.json` with defaults from `con
 | `auxiliaryPersonaFiles` | Additional persona files (STYLE.md, REGISTER.md, SLEEP.md) |
 | `factsFile` | Pinned facts (FACTS.md) |
 | `wakeFile` | Orientation context (WAKE.md) |
-| `observationsFile` | Neotoma render (OBSERVATIONS.md) |
+| `observationsFile` | Entity context render (OBSERVATIONS.md) |
 | `dreamsDir` | Dream journal directory |
 | `topicsFile` | Topic index (PERSONALITY_MATRIX.md) |
 | `memstoreSocketPath` | Unix socket for memstore (default: `$XDG_RUNTIME_DIR/memstore.sock`) |
-| `neotomaDataDir` | Neotoma data directory (default: `~/.pi/neotoma`) |
 
 ### Path resolution
 
@@ -83,15 +85,17 @@ which keys get path-resolved.
 
 ### `recall` — Search memory
 
-Searches memstore (FTS5 full-text) and Neotoma (entity search) for content matching a
-query. Returns top 3 memory entries with full bodies, plus any matching entity snapshots.
-Results include the session date (extracted from the `# Date:` header in the transcript)
-so that conflicting information from different time periods can be distinguished.
+Searches memstore for both session transcripts (FTS5 full-text, top 3) and entity
+observations (FTS5 full-text, top 5). Results are presented in two sections: "Recalled
+Sessions" and "Recalled Observations". Session results include the session date extracted
+from the `# Date:` header so that conflicting information from different time periods can
+be distinguished.
 
 ### `remember` — Store observations
 
-Writes observations to Neotoma's entity store. Each observation is appended to the named
-entity's history. Entity type mapping: `person` → `sophont` in Neotoma. Default entity
+Writes observations to memstore's observations table. Each observation is stored as a
+separate FTS5-indexed entry with entity_type and entity_name. The local entity-index.json
+is updated after each write. Entity type mapping: `person` → `sophont`. Default entity
 names: person→Neon, self→Monika, environment→stanza, preference→Neon.
 
 ### `remember_session` — Manual session save
@@ -118,16 +122,13 @@ restate the keywords.
 
 `/sleep` runs three sequential fork sessions:
 
-1. **WAKE.md** — reads recent sessions via `recall`, writes an orientation document
-2. **FACTS.md** — queries Neotoma for current entity state, curates pinned facts
+1. **WAKE.md** — reads recent sessions and entity context via `recall`, writes orientation
+2. **FACTS.md** — reads entity context and current FACTS.md, curates pinned facts
 3. **Dreams** — reflective writing with proposed topic addenda changes
 
 Each fork is a full `createAgentSession()` with the same extensions and persona. Forks
 use a retry system with model fallback (default model → Sonnet → others). Fork sessions
 are written to `sessions/forks/` and their shutdown triggers a session save to memstore.
-
-Pre-aggregation was removed in Phase 3 — forks use `recall` and the recency index instead
-of reading a pre-built archive file.
 
 ## File Layout
 
@@ -135,9 +136,8 @@ of reading a pre-built archive file.
 ~/.pi/agent/extensions/stateful-memory/
   extension.js          Main extension (event handlers, tools, commands)
   memstore-client.js    MemstoreClient — Unix socket JSON-RPC client
-  neotoma-client.js     NeotomaClient — CLI wrapper
   config.js             Config loading and path resolution
-  memory-store.js       File operations (persona, facts, observations, recency index)
+  memory-store.js       File operations (persona, facts, entity context, recency index)
   memory-prompt.js      System prompt section builders
   memory-sleep.js       Sleep cycle orchestration and fork runner
   session-utils.js      JSONL parsing and transcript normalization
@@ -148,6 +148,6 @@ of reading a pre-built archive file.
 ## Backend Dependencies
 
 - **memstore**: systemd user service on stanza. Socket at `$XDG_RUNTIME_DIR/memstore.sock`.
+  Provides both session transcript storage (entries table) and entity observation storage
+  (observations table), each with independent FTS5 indexes.
   See `/persist/shadowsea/services/stateful-memory/memstore/README.md`.
-- **Neotoma**: npm global package. CLI invoked via `child_process.execFile`.
-  See `/persist/shadowsea/services/stateful-memory/neotoma/README.md`.
