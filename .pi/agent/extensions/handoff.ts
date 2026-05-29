@@ -134,19 +134,24 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// Capture ui reference before newSession() — Pi 0.69.0+ invalidates
+			// the ctx object after session replacement, so any post-switch ui calls
+			// must go through a reference captured before the switch.
+			const ui = ctx.ui;
+
 			// Create new session with parent tracking
 			const newSessionResult = await ctx.newSession({
 				parentSession: currentSessionFile,
 			});
 
 			if (newSessionResult.cancelled) {
-				ctx.ui.notify("New session cancelled", "info");
+				ui.notify("New session cancelled", "info");
 				return;
 			}
 
 			// Set the edited prompt in the main editor for submission
-			ctx.ui.setEditorText(editedPrompt);
-			ctx.ui.notify("Handoff ready. Submit when ready.", "info");
+			ui.setEditorText(editedPrompt);
+			ui.notify("Handoff ready. Submit when ready.", "info");
 		},
 	});
 }

@@ -148,52 +148,54 @@ async function executeForkAttempt({ task, infra, model }) {
   let fullText = "";
   let lastTurnText = "";
   let agentResolved = false;
-  let runResult;
+  let timedOut = false;
   let runError;
 
-  try {
-    const forkPromise = new Promise((resolve, reject) => {
-      const unsub = forkSession.subscribe((event) => {
-        if (event.type === "turn_start") {
-          lastTurnText = "";
-        } else if (event.type === "message_update") {
-          const ae = event.assistantMessageEvent;
-          if (ae.type === "text_delta") {
-            fullText += ae.delta;
-            lastTurnText += ae.delta;
-          }
-        } else if (event.type === "agent_end") {
-          unsub();
-          agentResolved = true;
-          resolve({ fullText, lastTurnText });
-        }
-      });
+  // Abort-based timeout: instead of Promise.race with a rejecting timer,
+  // we call forkSession.agent.abort() which causes agent_end to fire naturally.
+  // This means we always collect partial output — nothing is discarded.
+  const abortTimeout = setTimeout(() => {
+    if (!agentResolved) {
+      timedOut = true;
+      console.warn(`[sleep] Fork timed out after ${FORK_TIMEOUT_MS / 1000}s — aborting`);
+      forkSession.agent.abort();
+    }
+  }, FORK_TIMEOUT_MS);
 
-      forkSession.prompt(task).catch((err) => {
+  // forkPromise always resolves (never rejects) — use flags for failure state.
+  const forkPromise = new Promise((resolve) => {
+    const unsub = forkSession.subscribe((event) => {
+      if (event.type === "turn_start") {
+        lastTurnText = "";
+      } else if (event.type === "message_update") {
+        const ae = event.assistantMessageEvent;
+        if (ae.type === "text_delta") {
+          fullText += ae.delta;
+          lastTurnText += ae.delta;
+        }
+      } else if (event.type === "agent_end") {
         unsub();
-        if (!agentResolved) reject(err);
-      });
+        agentResolved = true;
+        resolve();
+      }
     });
 
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => {
-        if (!agentResolved) {
-          reject(new Error(`Sleep fork timed out after ${FORK_TIMEOUT_MS / 1000}s`));
-        }
-      }, FORK_TIMEOUT_MS)
-    );
+    forkSession.prompt(task).catch((err) => {
+      unsub();
+      if (!agentResolved) {
+        agentResolved = true;
+        runError = err.message;
+        resolve();
+      }
+    });
+  });
 
-    runResult = await Promise.race([forkPromise, timeoutPromise]);
-  } catch (err) {
-    runError = err.message;
-    console.error(`[sleep] Fork error: ${runError}`);
-  }
+  await forkPromise;
+  clearTimeout(abortTimeout);
 
   // Fire session_shutdown so stateful-memory writes a session summary
   try {
-    if (agentResolved) {
-      await forkSession.agent.waitForIdle();
-    }
+    await forkSession.agent.waitForIdle();
     const runner = forkSession["_extensionRunner"];
     if (runner?.hasHandlers("session_shutdown")) {
       await runner.emit({ type: "session_shutdown" });
@@ -204,15 +206,28 @@ async function executeForkAttempt({ task, infra, model }) {
 
   forkSession.dispose();
 
-  if (runError || !runResult) {
-    return { success: false, error: runError ?? "Unknown error", sessionFile };
+  if (runError && !timedOut) {
+    return { success: false, error: runError, sessionFile };
   }
 
-  const markerIdx = runResult.fullText.lastIndexOf(TASK_COMPLETE_MARKER);
+  if (timedOut) {
+    const partial = fullText.trim();
+    const msg = `Timed out after ${FORK_TIMEOUT_MS / 1000}s`;
+    console.warn(`[sleep] Fork terminated — ${sessionFile} — ${msg}`);
+    return {
+      success: false,
+      error: partial.length > 0
+        ? `${msg}. Partial output:\n\n${partial}`
+        : msg,
+      sessionFile,
+    };
+  }
+
+  const markerIdx = fullText.lastIndexOf(TASK_COMPLETE_MARKER);
   const summary =
     markerIdx !== -1
-      ? runResult.fullText.slice(markerIdx + TASK_COMPLETE_MARKER.length).trim()
-      : runResult.lastTurnText.trim() || runResult.fullText.trim();
+      ? fullText.slice(markerIdx + TASK_COMPLETE_MARKER.length).trim()
+      : lastTurnText.trim() || fullText.trim();
 
   console.log(`[sleep] Fork complete — ${sessionFile}`);
   return { success: true, summary, sessionFile };
