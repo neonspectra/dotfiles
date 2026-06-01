@@ -17,6 +17,7 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	type BashOperations,
@@ -92,9 +93,10 @@ function truncateLine(line: string, maxChars = GREP_MAX_LINE_LENGTH): { text: st
 	return { text: `${line.slice(0, maxChars)}... [truncated]`, wasTruncated: true };
 }
 
-function sshExec(remote: string, command: string): Promise<Buffer> {
+function sshExec(remote: string, command: string, options?: string[]): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
-		const child = spawn("ssh", [...SSH_OPTIONS, remote, command], { stdio: ["ignore", "pipe", "pipe"] });
+		const sshOpts = options ?? SSH_OPTIONS;
+		const child = spawn("ssh", [...sshOpts, remote, command], { stdio: ["ignore", "pipe", "pipe"] });
 		const chunks: Buffer[] = [];
 		const errChunks: Buffer[] = [];
 		child.stdout.on("data", (data) => chunks.push(data));
@@ -108,6 +110,69 @@ function sshExec(remote: string, command: string): Promise<Buffer> {
 			}
 		});
 	});
+}
+
+/** SSH options for relocate validation — accepts new host keys automatically. */
+const RELOCATE_SSH_OPTIONS = [
+	"-o", "BatchMode=yes",
+	"-o", "ConnectTimeout=10",
+	"-o", "StrictHostKeyChecking=accept-new",
+];
+
+/**
+ * Validate an SSH connection before switching. Returns a structured result
+ * so the caller can report specific failure reasons.
+ */
+async function validateSshTarget(remote: string, remoteCwd?: string): Promise<{
+	success: boolean;
+	remoteCwd: string;
+	hostname?: string;
+	error?: string;
+	errorKind?: "host_key" | "auth" | "refused" | "timeout" | "path" | "unknown";
+}> {
+	try {
+		// Test basic connectivity
+		const echoResult = await sshExec(remote, "echo __relocate_ok__", RELOCATE_SSH_OPTIONS);
+		if (!echoResult.toString().includes("__relocate_ok__")) {
+			return { success: false, remoteCwd: "", error: "Unexpected response from host", errorKind: "unknown" };
+		}
+
+		// Get remote cwd
+		const cwd = remoteCwd ?? (await sshExec(remote, "pwd", RELOCATE_SSH_OPTIONS)).toString().trim();
+
+		// Verify cwd exists
+		try {
+			await sshExec(remote, `test -d ${JSON.stringify(cwd)}`, RELOCATE_SSH_OPTIONS);
+		} catch {
+			return { success: false, remoteCwd: cwd, error: `Remote path does not exist: ${cwd}`, errorKind: "path" };
+		}
+
+		// Get hostname for display
+		let hostname: string | undefined;
+		try {
+			hostname = (await sshExec(remote, "hostname", RELOCATE_SSH_OPTIONS)).toString().trim();
+		} catch { /* non-fatal */ }
+
+		return { success: true, remoteCwd: cwd, hostname };
+	} catch (error: any) {
+		const msg: string = error?.message ?? String(error);
+		if (msg.includes("Host key verification failed")) {
+			return { success: false, remoteCwd: "", error: "Host key verification failed — the host's SSH key has CHANGED (possible security issue). Manually verify and update known_hosts.", errorKind: "host_key" };
+		}
+		if (msg.includes("Permission denied")) {
+			return { success: false, remoteCwd: "", error: `Authentication failed for ${remote}. Check SSH keys and authorized_keys on the target.`, errorKind: "auth" };
+		}
+		if (msg.includes("Connection refused")) {
+			return { success: false, remoteCwd: "", error: `Connection refused by ${remote}. Is sshd running on the target?`, errorKind: "refused" };
+		}
+		if (msg.includes("timed out") || msg.includes("Connection timed out")) {
+			return { success: false, remoteCwd: "", error: `Connection timed out for ${remote}. Host may be unreachable.`, errorKind: "timeout" };
+		}
+		if (msg.includes("Could not resolve hostname")) {
+			return { success: false, remoteCwd: "", error: `Could not resolve hostname in ${remote}. Check the address.`, errorKind: "unknown" };
+		}
+		return { success: false, remoteCwd: "", error: msg, errorKind: "unknown" };
+	}
 }
 
 function parseSshArg(arg: string): { remote: string; remoteCwd?: string } {
@@ -614,6 +679,119 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ── Relocate tool ──────────────────────────────────────────────────────
+	// Switches the execution context mid-session. All tools (bash, read, write,
+	// edit, grep, find, ls) will route to the new target after a successful
+	// relocate. Validates connectivity BEFORE switching — if validation fails,
+	// the current context is preserved and a detailed error is returned.
+	const relocateSchema = Type.Object({
+		target: Type.Optional(Type.String({ description: 'SSH target: "user@host", "user@host:/path", or "local" to return to container-local execution. Omit to check current status.' })),
+	});
+
+	pi.registerTool({
+		name: "relocate",
+		description: "Switch execution context to a different host via SSH. All tools (bash, read, write, edit, grep, find, ls) will route to the new target after a successful relocate. Call with no target to check current context.",
+		label: "Relocate",
+		parameters: relocateSchema,
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const { target } = params as { target?: string };
+
+			// ── Status check (no target) ──
+			if (!target) {
+				if (resolvedSsh) {
+					return {
+						content: [{ type: "text" as const, text: `Current context: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}${remoteHost ? ` (hostname: ${remoteHost})` : ""}\nAll tools are routing to this target via SSH.` }],
+					};
+				}
+				return {
+					content: [{ type: "text" as const, text: "Current context: local (container-local execution).\nAll tools operate on the container filesystem." }],
+				};
+			}
+
+			// ── Return to local ──
+			if (target === "local") {
+				const wasRemote = resolvedSsh;
+				resolvedSsh = null;
+				sshRequired = false;
+				sshError = null;
+				remoteHost = null;
+				remoteAgentsContent = null;
+				if (ctx) {
+					ctx.ui.setStatus("ssh", "");
+					ctx.ui.notify("Relocated to local execution", "info");
+				}
+				return {
+					content: [{ type: "text" as const, text: `Relocated to local execution (container).${wasRemote ? ` Disconnected from ${wasRemote.remote}.` : ""}` }],
+				};
+			}
+
+			// ── Parse target ──
+			const parsed = parseSshArg(target);
+
+			// ── Validate BEFORE switching ──
+			const validation = await validateSshTarget(parsed.remote, parsed.remoteCwd);
+
+			if (!validation.success) {
+				// DO NOT change state. Return error with diagnosis.
+				const current = resolvedSsh ? `${resolvedSsh.remote}:${resolvedSsh.remoteCwd}` : "local";
+				const lines = [
+					`RELOCATE FAILED — staying on current context (${current}).`,
+					`Target: ${target}`,
+					`Error: ${validation.error}`,
+				];
+				if (validation.errorKind === "auth") {
+					lines.push("", "To fix: ensure the SSH public key is in the target's ~/.ssh/authorized_keys or /etc/ssh/authorized_keys.d/.");
+				} else if (validation.errorKind === "host_key") {
+					lines.push("", "To fix: verify the host's identity, then remove the old key from known_hosts and retry.");
+				} else if (validation.errorKind === "refused") {
+					lines.push("", "To fix: check that sshd is running on the target (systemctl status sshd).");
+				} else if (validation.errorKind === "path") {
+					lines.push("", "To fix: use a different path, e.g.: relocate user@host:/home/user");
+				}
+				if (ctx) {
+					ctx.ui.setStatus("ssh", ctx.ui.theme.fg("error", `SSH: FAILED ${target}`));
+					ctx.ui.notify(`Relocate failed: ${validation.error}`, "error");
+				}
+				return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+			}
+
+			// ── Switch context ──
+			const previousContext = resolvedSsh ? `${resolvedSsh.remote}:${resolvedSsh.remoteCwd}` : "local";
+			resolvedSsh = { remote: parsed.remote, remoteCwd: validation.remoteCwd };
+			sshRequired = true;
+			sshError = null;
+			remoteHost = validation.hostname ?? null;
+
+			// Read remote AGENTS.md if available
+			remoteAgentsContent = null;
+			try {
+				const agentsPath = `${validation.remoteCwd}/AGENTS.md`;
+				await sshExec(parsed.remote, `test -r ${JSON.stringify(agentsPath)}`, RELOCATE_SSH_OPTIONS);
+				const content = (await sshExec(parsed.remote, `cat ${JSON.stringify(agentsPath)}`, RELOCATE_SSH_OPTIONS)).toString("utf-8");
+				if (content.trim().length > 0) {
+					remoteAgentsContent = content;
+				}
+			} catch { /* no AGENTS.md, that's fine */ }
+
+			// Update UI
+			if (ctx) {
+				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
+				ctx.ui.notify(`Relocated to ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
+			}
+
+			// Build result
+			const lines = [
+				`Relocated: ${previousContext} → ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`,
+				`Hostname: ${validation.hostname ?? "unknown"}`,
+				`All tools (bash, read, write, edit, grep, find, ls) now operate on ${resolvedSsh.remote}.`,
+			];
+			if (remoteAgentsContent) {
+				lines.push("", "Remote AGENTS.md found and loaded into context.");
+			}
+			return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		// Resolve SSH config now that CLI flags are available
 		const arg = (pi.getFlag("ssh") as string | undefined) ?? getCliFlagValue("ssh");
@@ -661,6 +839,30 @@ export default function (pi: ExtensionAPI) {
 				}
 				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("error", "SSH: failed"));
 				ctx.ui.notify(`SSH requested but failed: ${sshError.message}`, "error");
+			}
+		}
+
+		// Auto-relocate from RELOCATE_TARGET env var (production container mode).
+		// Only fires if --ssh was not explicitly provided.
+		if (!arg && process.env.RELOCATE_TARGET) {
+			const autoTarget = process.env.RELOCATE_TARGET;
+			const parsed = parseSshArg(autoTarget);
+			const validation = await validateSshTarget(parsed.remote, parsed.remoteCwd);
+			if (validation.success) {
+				resolvedSsh = { remote: parsed.remote, remoteCwd: validation.remoteCwd };
+				sshRequired = true;
+				remoteHost = validation.hostname ?? null;
+				// Read AGENTS.md
+				try {
+					const agentsPath = `${validation.remoteCwd}/AGENTS.md`;
+					await sshExec(parsed.remote, `test -r ${JSON.stringify(agentsPath)}`, RELOCATE_SSH_OPTIONS);
+					const content = (await sshExec(parsed.remote, `cat ${JSON.stringify(agentsPath)}`, RELOCATE_SSH_OPTIONS)).toString("utf-8");
+					if (content.trim().length > 0) remoteAgentsContent = content;
+				} catch { /* no AGENTS.md */ }
+				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
+				ctx.ui.notify(`Auto-relocated to ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
+			} else {
+				ctx.ui.notify(`Auto-relocate to ${autoTarget} failed: ${validation.error}. Starting in container-local mode.`, "error");
 			}
 		}
 	});

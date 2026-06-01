@@ -17,6 +17,7 @@
 import net from "node:net";
 
 const DEFAULT_SOCKET_PATH =
+  process.env.MEMSTORE_SOCKET ||
   (process.env.XDG_RUNTIME_DIR || "/run/user/1002") + "/memstore.sock";
 
 const REQUEST_TIMEOUT_MS = 60_000;

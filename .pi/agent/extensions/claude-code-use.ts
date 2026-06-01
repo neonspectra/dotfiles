@@ -124,6 +124,8 @@ const KNOWN_TOOLS = new Map<string, string>([
 	["pi_run", "pi-self"],
 	// web-search
 	["web_search", "web-search"],
+	// ssh (includes relocate)
+	["relocate", "ssh"],
 	// browser (pi-agent-browser npm package — loaded as npm package, not extension dir)
 	["browser", "pi-agent-browser"],
 ]);

@@ -38,6 +38,8 @@ export default function forceTools(pi: ExtensionAPI) {
     "browser",
     // Fractal delegation (registered by delegate extension)
     "delegate",
+    // SSH context switching (registered by ssh extension)
+    "relocate",
   ];
 
   const enable = () => {
