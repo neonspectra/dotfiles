@@ -21,7 +21,6 @@
 # ssh
 !.ssh/
 .ssh/*
-!.ssh/config
 
 # themes
 !.gtkrc-2.0
