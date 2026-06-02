@@ -222,7 +222,11 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 	return {
 		exec: (command, cwd, { onData, signal, timeout }) =>
 			new Promise((resolve, reject) => {
-				const cmd = `cd ${JSON.stringify(toRemote(cwd))} && ${command}`;
+				// SSH non-interactive commands do not source .bashrc, so host-side
+				// environment needed by tools (notably GNUPGHOME for git commit signing)
+				// must be set explicitly. Keep this minimal to avoid surprising remotes.
+				const envPrelude = `if [ -z "$GNUPGHOME" ] && [ -d "$HOME/.config/gnupg" ]; then export GNUPGHOME="$HOME/.config/gnupg"; fi`;
+				const cmd = `cd ${JSON.stringify(toRemote(cwd))} && ${envPrelude} && ${command}`;
 				const child = spawn("ssh", [...SSH_OPTIONS, remote, cmd], { stdio: ["ignore", "pipe", "pipe"] });
 				let timedOut = false;
 				const timer = timeout
