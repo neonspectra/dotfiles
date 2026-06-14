@@ -107,6 +107,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
         // If this session is aborted (timeout cascade, user interrupt, etc.),
         // the child fork aborts too rather than running on as a zombie.
         parentSignal: signal,
+        parentSessionFile: sessionFile === "trunk" ? undefined : sessionFile,
       });
 
       // Partial / recovery results are returned as regular text so the calling

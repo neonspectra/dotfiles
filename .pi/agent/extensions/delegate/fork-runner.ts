@@ -337,8 +337,9 @@ export async function runFork(params: {
   depth: number;
   cwd: string;
   parentSignal?: AbortSignal;
+  parentSessionFile?: string;
 }): Promise<ForkResult> {
-  const { task, context, depth, cwd, parentSignal } = params;
+  const { task, context, depth, cwd, parentSignal, parentSessionFile } = params;
 
   // If the parent is already aborted before we even start, bail immediately.
   if (parentSignal?.aborted) {
@@ -356,6 +357,15 @@ export async function runFork(params: {
   // ── Create fork session ────────────────────────────────────────────────────
   const forkSession = await createForkSession(cwd);
   const sessionFile = forkSession.sessionFile ?? `(in-memory-${Date.now()})`;
+  try {
+    forkSession.sessionManager.appendCustomEntry('monika.lineage', {
+      kind: 'delegate',
+      parentSession: parentSessionFile ?? null,
+      source: 'delegate-extension',
+      depth,
+      createdAt: new Date().toISOString(),
+    });
+  } catch {}
   console.log(`[delegate] Fork starting — depth ${depth}/3, file: ${sessionFile}`);
 
   // Register depth BEFORE prompt runs so the delegate tool can look it up.

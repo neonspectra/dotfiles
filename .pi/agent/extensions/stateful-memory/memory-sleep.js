@@ -93,7 +93,7 @@ function findFallbackModel(modelRegistry) {
 
 // ─── Single fork attempt ──────────────────────────────────────────────────────
 
-async function executeForkAttempt({ task, infra, model }) {
+async function executeForkAttempt({ task, infra, model, phase, parentSessionFile }) {
   const { authStorage, modelRegistry, cwd } = infra;
 
   // Use disk-backed settings so the fork inherits defaultProvider/defaultModel
@@ -143,6 +143,15 @@ async function executeForkAttempt({ task, infra, model }) {
   });
 
   const sessionFile = forkSession.sessionFile ?? `(in-memory-${Date.now()})`;
+  try {
+    forkSession.sessionManager.appendCustomEntry('monika.lineage', {
+      kind: 'sleep',
+      phase: phase ?? null,
+      parentSession: parentSessionFile ?? null,
+      source: 'stateful-memory-sleep',
+      createdAt: new Date().toISOString(),
+    });
+  } catch {}
   console.log(`[sleep] Fork starting — file: ${sessionFile}`);
 
   let fullText = "";
@@ -241,7 +250,7 @@ async function executeForkAttempt({ task, infra, model }) {
 //
 // Each attempt gets the full FORK_TIMEOUT_MS window.
 
-async function runSleepFork({ task, cwd, infra }) {
+async function runSleepFork({ task, cwd, infra, phase, parentSessionFile }) {
   let lastError;
 
   for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
@@ -265,7 +274,7 @@ async function runSleepFork({ task, cwd, infra }) {
       await new Promise((r) => setTimeout(r, cooldown));
     }
 
-    const result = await executeForkAttempt({ task, infra, model });
+    const result = await executeForkAttempt({ task, infra, model, phase, parentSessionFile });
     if (result.success) return result;
 
     lastError = result.error;
@@ -475,7 +484,11 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
 
   // ── Phase 1: WAKE.md ───────────────────────────────────────────────────
   notify("Phase 1/3: Writing WAKE.md...");
+  const parentSessionFile = ctx.sessionManager.getSessionFile?.();
+
   const wakeResult = await runSleepFork({
+    phase: "wake",
+    parentSessionFile,
     task: buildWakeTask({ recencyIndexFile, observationsFile, wakeFile }),
     cwd: ctx.cwd,
     infra,
@@ -493,6 +506,8 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 2: FACTS.md ──────────────────────────────────────────────────
   notify("Phase 2/3: Curating FACTS.md...");
   const factsResult = await runSleepFork({
+    phase: "facts",
+    parentSessionFile,
     task: buildFactsTask({ observationsFile, factsFile }),
     cwd: ctx.cwd,
     infra,
@@ -510,6 +525,8 @@ export async function runSleepCycle({ ctx, config, store, summarizeCurrentSessio
   // ── Phase 3: Dreams ────────────────────────────────────────────────────
   notify("Phase 3/3: Dreaming...");
   const dreamResult = await runSleepFork({
+    phase: "dream",
+    parentSessionFile,
     task: buildDreamTask({ wakeFile, topicsDir, dreamFile }),
     cwd: ctx.cwd,
     infra,

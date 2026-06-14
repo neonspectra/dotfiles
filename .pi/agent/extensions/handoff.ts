@@ -142,6 +142,14 @@ export default function (pi: ExtensionAPI) {
 			// Create new session with parent tracking
 			const newSessionResult = await ctx.newSession({
 				parentSession: currentSessionFile,
+				setup: async (sessionManager) => {
+					sessionManager.appendCustomEntry('monika.lineage', {
+						kind: 'handoff',
+						parentSession: currentSessionFile,
+						source: 'pi-extension',
+						createdAt: new Date().toISOString(),
+					});
+				},
 			});
 
 			if (newSessionResult.cancelled) {
