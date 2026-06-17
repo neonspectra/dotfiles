@@ -15,3 +15,8 @@
 	required = true
 [include]
 	path = ~/.gitconfig.local
+[user]
+	name = Monika
+	email = monika@neosynth.net
+[safe]
+	directory = *
