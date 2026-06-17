@@ -16,7 +16,7 @@
 [include]
 	path = ~/.gitconfig.local
 [user]
-	name = Monika
-	email = monika@neosynth.net
+	name = Neon
+	email = neon@neosynth.net
 [safe]
 	directory = *
