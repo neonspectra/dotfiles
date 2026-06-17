@@ -37,45 +37,10 @@ export function slugifyTopic(text, maxWords = 6) {
 }
 
 const SLUG_STOP_WORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "but",
-  "by",
-  "for",
-  "from",
-  "has",
-  "have",
-  "i",
-  "if",
-  "in",
-  "is",
-  "it",
-  "me",
-  "my",
-  "of",
-  "on",
-  "or",
-  "our",
-  "she",
-  "that",
-  "the",
-  "their",
-  "they",
-  "this",
-  "to",
-  "we",
-  "what",
-  "when",
-  "where",
-  "who",
-  "with",
-  "you",
-  "your",
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+  "has", "have", "i", "if", "in", "is", "it", "me", "my", "of", "on", "or",
+  "our", "she", "that", "the", "their", "they", "this", "to", "we", "what",
+  "when", "where", "who", "with", "you", "your",
 ]);
 
 export function slugifyKeywords(text, maxWords = 6) {
@@ -106,46 +71,219 @@ export function slugifyKeywords(text, maxWords = 6) {
   return keywords.length > 0 ? keywords.join("-") : "untitled";
 }
 
-export function formatMemoryLine({
-  text,
-  tags = [],
-  timestamp = new Date(),
-  sessionPath = "unknown",
-}) {
-  const sessionSection = sessionPath
-    ? ` [session: ${sessionPath}]`
-    : "";
-  const tagSection = tags.length > 0 ? ` [tags: ${tags.join(", ")}]` : "";
-  return `- [${formatTimestamp(timestamp)}]${sessionSection}${tagSection} ${text}`.trim();
+// ── Entity context render ────────────────────────────────────────────────────
+
+const TYPE_ORDER = ["sophont", "project", "decision", "environment", "preference", "self"];
+const TYPE_LABELS = {
+  sophont: "People",
+  project: "Projects",
+  decision: "Decisions",
+  environment: "Environment",
+  preference: "Preferences",
+  self: "Self",
+};
+
+/**
+ * Render entity context from memstore observations + entity-index.json.
+ * Produces a markdown file with recent observations and entity awareness.
+ *
+ * @param {import('./memstore-client.js').MemstoreClient} memstoreClient
+ * @param {string} entityIndexPath — path to entity-index.json
+ * @param {string} outputPath — path to write OBSERVATIONS.md
+ * @returns {Promise<string>} the rendered content
+ */
+export async function renderEntityContext(memstoreClient, entityIndexPath, outputPath) {
+  // Load entity index
+  let entityIndex = {};
+  try {
+    const raw = await fs.readFile(entityIndexPath, "utf8");
+    entityIndex = JSON.parse(raw);
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error("[stateful-memory] Failed to read entity-index.json:", err.message);
+    }
+  }
+
+  // Fetch recent observations from memstore
+  let recentObs = [];
+  try {
+    const result = await memstoreClient.listObservations({ limit: 15 });
+    recentObs = result.observations || [];
+  } catch (err) {
+    console.error("[stateful-memory] Failed to list observations:", err.message);
+  }
+
+  const sections = [];
+  sections.push("# Entity Observations");
+  sections.push("");
+  sections.push("*Rendered from memstore observation store. Regenerated on every session start.*");
+
+  // ── Part 1: Recent observations (last 15) ──
+  if (recentObs.length > 0) {
+    // Group recent observations by entity type for readability
+    const recentByType = new Map();
+    const recentEntityKeys = new Set();
+    for (const obs of recentObs) {
+      const type = obs.entity_type;
+      if (!recentByType.has(type)) recentByType.set(type, []);
+      recentByType.get(type).push(obs);
+      recentEntityKeys.add(`${type}:${obs.entity_name}`);
+    }
+
+    // Render in defined order, then any unknown types
+    const orderedTypes = [...TYPE_ORDER];
+    for (const type of recentByType.keys()) {
+      if (!orderedTypes.includes(type)) orderedTypes.push(type);
+    }
+
+    for (const type of orderedTypes) {
+      const observations = recentByType.get(type);
+      if (!observations || observations.length === 0) continue;
+
+      const label = TYPE_LABELS[type] || type.charAt(0).toUpperCase() + type.slice(1);
+      sections.push("");
+      sections.push(`## ${label}`);
+
+      // Group by entity name within type
+      const byName = new Map();
+      for (const obs of observations) {
+        if (!byName.has(obs.entity_name)) byName.set(obs.entity_name, []);
+        byName.get(obs.entity_name).push(obs);
+      }
+
+      for (const [name, obs] of byName) {
+        sections.push(`\n### ${name}`);
+        for (const o of obs) {
+          // Truncate long observations to ~150 chars
+          const body = o.body.length > 150
+            ? o.body.slice(0, 147) + "..."
+            : o.body;
+          sections.push(`- ${body}`);
+        }
+      }
+    }
+
+    // ── Part 2: Entity awareness (entities not already shown) ──
+    const unseenEntities = Object.entries(entityIndex)
+      .filter(([key]) => !recentEntityKeys.has(key))
+      .map(([, entry]) => entry);
+
+    if (unseenEntities.length > 0) {
+      sections.push("");
+      sections.push("## Other Known Entities");
+      sections.push("");
+
+      // Sort by last_observed descending
+      unseenEntities.sort((a, b) => {
+        const da = Date.parse(a.last_observed) || 0;
+        const db = Date.parse(b.last_observed) || 0;
+        return db - da;
+      });
+
+      for (const ent of unseenEntities) {
+        const typeLabel = TYPE_LABELS[ent.entity_type] || ent.entity_type;
+        const date = ent.last_observed
+          ? new Date(ent.last_observed).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+          : "unknown";
+        sections.push(`- **${ent.entity_name}** (${typeLabel}) — ${ent.count} obs, last ${date}`);
+      }
+    }
+  } else {
+    // No recent observations — just render full entity awareness
+    const allEntities = Object.values(entityIndex);
+    if (allEntities.length > 0) {
+      // Group by type
+      const groups = new Map();
+      for (const ent of allEntities) {
+        if (!groups.has(ent.entity_type)) groups.set(ent.entity_type, []);
+        groups.get(ent.entity_type).push(ent);
+      }
+
+      const orderedTypes = [...TYPE_ORDER];
+      for (const type of groups.keys()) {
+        if (!orderedTypes.includes(type)) orderedTypes.push(type);
+      }
+
+      for (const type of orderedTypes) {
+        const entities = groups.get(type);
+        if (!entities || entities.length === 0) continue;
+
+        const label = TYPE_LABELS[type] || type.charAt(0).toUpperCase() + type.slice(1);
+        sections.push("");
+        sections.push(`## ${label}`);
+        sections.push("");
+
+        entities.sort((a, b) => a.entity_name.localeCompare(b.entity_name));
+        for (const ent of entities) {
+          const date = ent.last_observed
+            ? new Date(ent.last_observed).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+            : "unknown";
+          sections.push(`- **${ent.entity_name}** — ${ent.count} obs, last ${date}`);
+        }
+      }
+    } else {
+      sections.push("");
+      sections.push("*(No observations recorded yet.)*");
+    }
+  }
+
+  const content = sections.join("\n") + "\n";
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await fs.writeFile(outputPath, content, "utf8");
+  return content;
 }
 
-export function parseMemoryLine(line) {
-  const match = line.match(
-    /^-\s+\[(?<timestamp>[^\]]+)\](?:\s+\[session:\s*(?<session>[^\]]+)\])?(?:\s+\[tags:\s*(?<tags>[^\]]+)\])?\s+(?<text>.+)$/
-  );
-  if (!match?.groups) {
-    return null;
-  }
-  const tags = match.groups.tags
-    ? match.groups.tags.split(",").map((tag) => tag.trim()).filter(Boolean)
-    : [];
-  return {
-    timestamp: match.groups.timestamp,
-    sessionPath: match.groups.session,
-    tags,
-    text: match.groups.text,
-    raw: line,
-  };
+// ── Recency index ───────────────────────────────────────────────────────────
+
+/**
+ * Update the recency index with a new session write-back entry.
+ * Most recent first, capped at 50 entries.
+ *
+ * @param {string} indexPath
+ * @param {{ sessionPath: string, timestamp: string, tags: string[] }} entry
+ */
+export async function updateRecencyIndex(indexPath, entry) {
+  let entries = await readRecencyIndex(indexPath);
+
+  // Remove any existing entry for this session (dedup on resume)
+  entries = entries.filter(e => e.sessionPath !== entry.sessionPath);
+
+  // Prepend new entry
+  entries.unshift(entry);
+
+  // Cap at 50
+  if (entries.length > 50) entries = entries.slice(0, 50);
+
+  await fs.mkdir(path.dirname(indexPath), { recursive: true });
+  await fs.writeFile(indexPath, JSON.stringify(entries, null, 2), "utf8");
 }
+
+/**
+ * Read the recency index. Returns empty array if file doesn't exist.
+ * @param {string} indexPath
+ * @returns {Promise<Array<{ sessionPath: string, timestamp: string, tags: string[] }>>}
+ */
+export async function readRecencyIndex(indexPath) {
+  try {
+    const raw = await fs.readFile(indexPath, "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    console.error("[stateful-memory] Failed to read recency index:", error.message);
+    return [];
+  }
+}
+
+// ── MemoryStore ─────────────────────────────────────────────────────────────
 
 export class MemoryStore {
-  constructor({ memoryDir, personaFile, auxiliaryPersonaFiles = [], factsFile, wakeFile, memoryFile }) {
+  constructor({ memoryDir, personaFile, auxiliaryPersonaFiles = [], factsFile, wakeFile, observationsFile }) {
     this.memoryDir = memoryDir;
     this.personaFile = personaFile;
     this.auxiliaryPersonaFiles = auxiliaryPersonaFiles;
     this.factsFile = factsFile;
     this.wakeFile = wakeFile;
-    this.memoryFile = memoryFile;
+    this.observationsFile = observationsFile;
     this.sessionPath = "unknown";
     this.sessionStartedAt = new Date();
   }
@@ -159,35 +297,7 @@ export class MemoryStore {
     }
   }
 
-  setMemoryFile(fileName) {
-    this.memoryFile = fileName;
-  }
-
-  get memoryFilePath() {
-    return path.join(this.memoryDir, this.memoryFile);
-  }
-
-  get sessionStamp() {
-    return formatSessionStamp(this.sessionStartedAt);
-  }
-
-  getSessionFileName(topicSlug = "untitled") {
-    return `session-${this.sessionStamp}__${topicSlug}.md`;
-  }
-
   async ensureFiles({ defaultPersona, defaultUserProfile } = {}) {
-    if (!this.memoryFile) {
-      throw new Error("Memory file name is not set.");
-    }
-
-    await fs.mkdir(this.memoryDir, { recursive: true });
-
-    const header = `# Session Memory\n\nSession: ${this.sessionPath}\nStarted: ${formatTimestamp(
-      this.sessionStartedAt
-    )}\n`;
-
-    await this.#ensureFile(this.memoryFilePath, `${header}\n`);
-
     if (this.personaFile) {
       await this.#ensureFile(
         this.personaFile,
@@ -240,6 +350,13 @@ export class MemoryStore {
     return this.#readFileSafe(this.wakeFile);
   }
 
+  async readObservations() {
+    if (!this.observationsFile) {
+      return "";
+    }
+    return this.#readFileSafe(this.observationsFile);
+  }
+
   async #readFileSafe(filePath) {
     try {
       return await fs.readFile(filePath, "utf8");
@@ -249,148 +366,5 @@ export class MemoryStore {
       }
       throw error;
     }
-  }
-
-  async readMemoryEntries() {
-    return this.#readMemoryFileEntries(this.memoryFilePath);
-  }
-
-  async readAllMemoryEntries() {
-    const files = await this.#listMemoryFiles();
-    const entries = [];
-
-    for (const file of files) {
-      const fileEntries = await this.#readMemoryFileEntries(
-        path.join(this.memoryDir, file)
-      );
-      entries.push(...fileEntries);
-    }
-
-    return entries;
-  }
-
-  async listMemoryFiles() {
-    return this.#listMemoryFiles();
-  }
-
-  async readMemoryFile(fileName) {
-    return this.#readFileSafe(path.join(this.memoryDir, fileName));
-  }
-
-  async readMemoryFileEntries(fileName) {
-    return this.#readMemoryFileEntries(path.join(this.memoryDir, fileName));
-  }
-
-  async upsertSessionSummary(text, { tags = [] } = {}) {
-    const summaryTags = ["session-summary", ...tags]
-      .map((tag) => tag?.trim())
-      .filter(Boolean);
-    const line = formatMemoryLine({
-      text,
-      tags: [...new Set(summaryTags)],
-      sessionPath: this.sessionPath,
-    });
-
-    const raw = await this.#readFileSafe(this.memoryFilePath);
-    const lines = raw.split("\n");
-
-    const filtered = lines.filter((entry) => {
-      const parsed = parseMemoryLine(entry.trim());
-      if (!parsed) {
-        return true;
-      }
-      return !parsed.tags.includes("session-summary");
-    });
-
-    let insertIndex = filtered.findIndex((entry) => entry.trim().startsWith("- ["));
-    if (insertIndex === -1) {
-      insertIndex = filtered.length;
-    }
-
-    filtered.splice(insertIndex, 0, line);
-
-    let output = filtered.join("\n");
-    if (!output.endsWith("\n")) {
-      output += "\n";
-    }
-
-    await fs.writeFile(this.memoryFilePath, output, "utf8");
-    return line;
-  }
-
-  async #readMemoryFileEntries(filePath) {
-    const raw = await this.#readFileSafe(filePath);
-    return raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map(parseMemoryLine)
-      .filter(Boolean);
-  }
-
-  async #listMemoryFiles() {
-    try {
-      const entries = await fs.readdir(this.memoryDir, {
-        withFileTypes: true,
-      });
-      return entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-        .map((entry) => entry.name)
-        .sort();
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return [];
-      }
-      throw error;
-    }
-  }
-
-  async appendMemories(items, { tags = [] } = {}) {
-    const lines = items
-      .map((text) => text?.trim())
-      .filter(Boolean)
-      .map((text) =>
-        formatMemoryLine({
-          text,
-          tags,
-          sessionPath: this.sessionPath,
-        })
-      );
-
-    if (lines.length === 0) {
-      return [];
-    }
-
-    const payload = `\n${lines.join("\n")}\n`;
-    await fs.appendFile(this.memoryFilePath, payload, "utf8");
-    return lines;
-  }
-
-  async appendFacts(items, { heading = "Learned Facts" } = {}) {
-    if (!this.factsFile) {
-      return [];
-    }
-
-    const additions = items
-      .map((text) => text?.trim())
-      .filter(Boolean)
-      .map((text) => `- ${text}`);
-
-    if (additions.length === 0) {
-      return [];
-    }
-
-    let current = await this.#readFileSafe(this.factsFile);
-    const header = `## ${heading}`;
-
-    if (!current.includes(header)) {
-      current = `${current.trimEnd()}\n\n${header}\n`;
-    } else if (!current.endsWith("\n")) {
-      current += "\n";
-    }
-
-    current += `${additions.join("\n")}\n`;
-    await fs.writeFile(this.factsFile, current, "utf8");
-    return additions;
   }
 }

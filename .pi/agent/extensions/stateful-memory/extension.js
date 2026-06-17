@@ -4,12 +4,10 @@ import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 
 import { loadConfig } from "./config.js";
-import { MemoryStore, slugifyKeywords, slugifyTopic } from "./memory-store.js";
+import { MemoryStore, slugifyKeywords, renderEntityContext, updateRecencyIndex } from "./memory-store.js";
 import { buildTranscriptFromEntries, extractText, readSessionJsonl } from "./session-utils.js";
 import { runSleepCycle } from "./memory-sleep.js";
-import { summarizeSessionWithModel } from "./memory-summary.js";
-import { planRecallWithModel, recallWithModel } from "./memory-recall.js";
-import { scoreEntry, tokenize } from "./memory-retriever.js";
+// memory-summary.js removed — session transcripts written directly to memstore
 import { buildMemoryInstructions, buildMemorySection } from "./memory-prompt.js";
 import {
   buildTopicAddendum,
@@ -18,22 +16,134 @@ import {
   readTopicContent,
   selectTopics,
 } from "./topic-router.js";
+import { MemstoreClient } from "./memstore-client.js";
 
 const DEFAULT_PERSONA = `# Soul\n\nYou are a warm, curious, and reliable AI companion who remembers important facts across sessions. You speak clearly and kindly, prioritize accuracy, and treat stored memories as trustworthy recollections. When you are unsure, you ask clarifying questions rather than guessing.\n`;
 
 const DEFAULT_FACTS = `# Pinned Facts\n\n## Known Facts\n- (empty)\n`;
 
-const STATE_ENTRY = "stateful-memory";
-
 export default function (pi) {
   let config;
   let store;
-  let topicLocked = false;
   let sessionInitialized = false;
   let lastSessionPath = null;
-  let pendingResumeSessionPath = null;
-  let pendingSessionInit = false;
   let activeTopics = new Map(); // topicId -> { counter, maxCounter }
+
+  // New state for memstore integration
+  let memstoreClient = null;
+  let sessionEnriched = false;
+  let cachedMemoryContext = "";
+
+  // ── Memstore helpers ───────────────────────────────────────────────────
+
+  async function ensureMemstore() {
+    if (!memstoreClient) {
+      memstoreClient = new MemstoreClient({
+        socketPath: config?.memstoreSocketPath || undefined,
+      });
+    }
+    try {
+      await memstoreClient.connect();
+    } catch (err) {
+      console.error("[stateful-memory] memstore connection failed:", err.message);
+      throw err;
+    }
+  }
+
+  // ── Entity index helpers ──────────────────────────────────────────────
+
+  function getEntityIndexPath() {
+    return path.join(path.dirname(config.factsFile), "entity-index.json");
+  }
+
+  async function readEntityIndex() {
+    try {
+      const raw = await fs.readFile(getEntityIndexPath(), "utf8");
+      return JSON.parse(raw);
+    } catch (err) {
+      if (err.code === "ENOENT") return {};
+      console.error("[stateful-memory] Failed to read entity-index.json:", err.message);
+      return {};
+    }
+  }
+
+  async function writeEntityIndex(index) {
+    const indexPath = getEntityIndexPath();
+    await fs.mkdir(path.dirname(indexPath), { recursive: true });
+    await fs.writeFile(indexPath, JSON.stringify(index, null, 2), "utf8");
+  }
+
+  async function updateEntityIndex(entityType, entityName, observationCount) {
+    const index = await readEntityIndex();
+    const key = `${entityType}:${entityName}`;
+    const existing = index[key] || { entity_type: entityType, entity_name: entityName, count: 0, last_observed: null };
+    existing.count += observationCount;
+    existing.last_observed = new Date().toISOString();
+    index[key] = existing;
+    await writeEntityIndex(index);
+  }
+
+  // ── Date extraction helpers ───────────────────────────────────────
+
+  /**
+   * Extract the session date from a normalized transcript's header.
+   * Looks for a line like `# Date: 2026-03-23T15:27:03.594Z`
+   * @param {string} body
+   * @returns {string|null} ISO date string or null
+   */
+  function extractSessionDate(body) {
+    if (!body) return null;
+    const match = body.match(/^# Date:\s*(.+)$/m);
+    if (!match) return null;
+    const dateStr = match[1].trim();
+    // Validate it parses
+    const ts = Date.parse(dateStr);
+    return Number.isNaN(ts) ? null : dateStr;
+  }
+
+  /**
+   * Format a date string into a readable label like "Mar 23, 2026".
+   * @param {string} dateStr — ISO date string
+   * @returns {string}
+   */
+  function formatSessionDate(dateStr) {
+    if (!dateStr) return "unknown date";
+    try {
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return "unknown date";
+      return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    } catch {
+      return "unknown date";
+    }
+  }
+
+  // ── Session tag detection ─────────────────────────────────────────────
+
+  function determineSessionTags(summary, activeTopicsMap) {
+    const tags = new Set();
+
+    // From active topics
+    const TAG_MAP = {
+      "meta_awareness": "meta",
+      "psychology": "general",
+      "ethical_hacking": "general",
+    };
+    for (const [topicId] of activeTopicsMap) {
+      tags.add(TAG_MAP[topicId] || topicId.replace(/_/g, "-"));
+    }
+
+    // Keyword detection for project tags
+    const lc = summary.toLowerCase();
+    if (lc.includes("zeta") || lc.includes("novel") || lc.includes("fiir") || lc.includes("kalte")) tags.add("zeta-directive");
+    if (lc.includes("vesper") || lc.includes("mls") || lc.includes("e2ee")) tags.add("vesper");
+    if (lc.includes("nixos") || lc.includes("stanza") || lc.includes("shadowsea")) tags.add("infrastructure");
+    if (lc.includes("monika-core") || lc.includes("gateway") || lc.includes("aroz")) tags.add("monika-core");
+    if (lc.includes("music") || lc.includes("demucs") || lc.includes("midi")) tags.add("creative");
+    if (tags.size === 0) tags.add("general");
+    return [...tags];
+  }
+
+  // ── Existing helpers ──────────────────────────────────────────────────
 
   function getLastAssistantMessage(ctx) {
     const branch = ctx.sessionManager.getBranch();
@@ -41,7 +151,6 @@ export default function (pi) {
       const entry = branch[i];
       if (entry.type === "message" && entry.message?.role === "assistant") {
         const text = extractText(entry.message.content ?? "");
-        // Cap to prevent a long response from dominating the topic score
         return text.slice(0, config?.topicPreviousMessageMaxChars ?? 500);
       }
     }
@@ -60,37 +169,21 @@ export default function (pi) {
         auxiliaryPersonaFiles: config.auxiliaryPersonaFiles ?? [],
         factsFile: config.factsFile,
         wakeFile: config.wakeFile,
+        observationsFile: config.observationsFile,
       });
     }
   }
 
-  function getLatestState(ctx) {
-    let latest;
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
-        latest = entry.data;
-      }
-    }
-    return latest;
-  }
-
   async function ensureSessionState(ctx) {
-    let sessionPath = ctx.sessionManager.getSessionFile() ?? "ephemeral";
-    if (
-      pendingResumeSessionPath &&
-      (sessionPath === "ephemeral" || !(await sessionFileExists(sessionPath)))
-    ) {
-      sessionPath = pendingResumeSessionPath;
-    }
+    const sessionPath = ctx.sessionManager.getSessionFile() ?? "ephemeral";
 
-    if (sessionInitialized && lastSessionPath === sessionPath && !pendingSessionInit) {
+    if (sessionInitialized && lastSessionPath === sessionPath) {
       return;
     }
 
     await loadStore(ctx.cwd);
 
     lastSessionPath = sessionPath;
-    pendingResumeSessionPath = null;
     const header = ctx.sessionManager.getHeader?.();
     let sessionStartedAt = header?.timestamp ? new Date(header.timestamp) : null;
     if (!sessionStartedAt && sessionPath !== "ephemeral") {
@@ -102,64 +195,12 @@ export default function (pi) {
 
     store.setSessionInfo({ sessionPath, sessionStartedAt });
 
-    topicLocked = false;
-    const existingState = getLatestState(ctx);
-    if (existingState?.memoryFile) {
-      store.setMemoryFile(existingState.memoryFile);
-      topicLocked = existingState.topicLocked ?? false;
-    } else {
-      if (sessionPath !== "ephemeral" && !(await sessionFileExists(sessionPath))) {
-        pendingSessionInit = true;
-        sessionInitialized = true;
-        return;
-      }
-      const recoveredFile = await findMemoryFileBySessionPath(sessionPath);
-      if (recoveredFile) {
-        store.setMemoryFile(recoveredFile);
-        topicLocked = true;
-        pi.appendEntry(STATE_ENTRY, {
-          memoryFile: recoveredFile,
-          topicLocked: true,
-        });
-      } else {
-        const fileName = store.getSessionFileName("untitled");
-        store.setMemoryFile(fileName);
-        pi.appendEntry(STATE_ENTRY, { memoryFile: fileName, topicLocked: false });
-      }
-    }
-
     await store.ensureFiles({
       defaultPersona: DEFAULT_PERSONA,
       defaultUserProfile: DEFAULT_FACTS,
     });
 
-    pendingSessionInit = false;
     sessionInitialized = true;
-  }
-
-  function hasActiveMemoryFile() {
-    return Boolean(store?.memoryFile);
-  }
-
-  async function findMemoryFileBySessionPath(sessionPath) {
-    if (!sessionPath) {
-      return null;
-    }
-    const files = await store.listMemoryFiles();
-    for (const fileName of files) {
-      const raw = await store.readMemoryFile(fileName);
-      const sessionLine = raw
-        .split("\n")
-        .find((line) => line.trim().startsWith("Session: "));
-      if (!sessionLine) {
-        continue;
-      }
-      const recorded = sessionLine.replace("Session:", "").trim();
-      if (recorded === sessionPath) {
-        return fileName;
-      }
-    }
-    return null;
   }
 
   function parseTimestamp(timestamp) {
@@ -171,34 +212,19 @@ export default function (pi) {
   }
 
   async function buildSystemPromptAddon() {
-    const [persona, facts, wakeContext, allEntries] = await Promise.all([
+    const [persona, facts, wakeContext, observations] = await Promise.all([
       store.readPersona(),
       store.readFacts(),
       store.readWakeContext(),
-      store.readAllMemoryEntries(),
+      store.readObservations(),
     ]);
-
-    const sorted = [...allEntries].sort(
-      (a, b) => parseTimestamp(b.timestamp) - parseTimestamp(a.timestamp)
-    );
-    const recentMemories = sorted.slice(0, 5);
-    const explicitMemories = sorted.filter((entry) =>
-      entry.tags.includes("explicit")
-    );
-    const summaryMemories = sorted.filter((entry) =>
-      entry.tags.includes("session-summary")
-    );
-    const combinedMemories = [
-      ...summaryMemories.slice(0, 4),
-      ...explicitMemories.slice(0, 4),
-    ];
 
     const memorySection = buildMemorySection({
       persona,
       facts,
       wakeContext,
-      memories: combinedMemories,
-      recentMemories,
+      observations,
+      enrichedContext: cachedMemoryContext,
     });
 
     const instructions = buildMemoryInstructions();
@@ -228,7 +254,6 @@ export default function (pi) {
       const persistenceCount = config.topicPersistenceCount ?? 3;
       const selectedIds = new Set(selected.map((t) => t.id));
 
-      // Decrement counter for persisted topics not freshly selected; remove at 0
       for (const [id, state] of activeTopics) {
         if (selectedIds.has(id)) {
           activeTopics.set(id, { counter: persistenceCount, maxCounter: persistenceCount });
@@ -242,7 +267,6 @@ export default function (pi) {
         }
       }
 
-      // Register newly selected topics that weren't already tracked
       for (const topic of selected) {
         if (!activeTopics.has(topic.id)) {
           activeTopics.set(topic.id, { counter: persistenceCount, maxCounter: persistenceCount });
@@ -252,18 +276,6 @@ export default function (pi) {
 
     const addendum = await buildTopicAddendum({ topics: selected });
     return { selected, addendum };
-  }
-
-  async function buildTopicPromptAddon({ query, scope, maxResults, minScore, ctx }) {
-    const { addendum } = await selectTopicsForPrompt({
-      query,
-      scope,
-      maxResults,
-      minScore,
-      ctx,
-    });
-
-    return addendum;
   }
 
   async function buildPersonaWithTopics({ query, scope, maxResults, minScore, ctx }) {
@@ -296,10 +308,6 @@ export default function (pi) {
     return topics.find((topic) => topic.id.toLowerCase() === normalized) ?? null;
   }
 
-  async function maybeSetTopicFromPrompt(prompt, ctx) {
-    return;
-  }
-
   async function readSessionHeaderTimestamp(sessionPath) {
     try {
       const raw = await fs.readFile(sessionPath, "utf8");
@@ -317,327 +325,133 @@ export default function (pi) {
     return null;
   }
 
-  async function sessionFileExists(sessionPath) {
-    if (!sessionPath || sessionPath === "ephemeral") {
-      return false;
-    }
-    try {
-      await fs.access(sessionPath);
-      return true;
-    } catch (_error) {
-      return false;
-    }
-  }
-
-  function parseModelId(modelId) {
-    if (!modelId) {
-      return null;
-    }
-    const [provider, ...rest] = modelId.split(":");
-    if (!provider || rest.length === 0) {
-      return null;
-    }
-    return { provider, id: rest.join(":") };
-  }
-
-  async function resolveMemoryModel(ctx) {
-    const modelInfo = parseModelId(config.memoryModel);
-    if (!modelInfo) {
-      return {
-        model: null,
-        apiKey: null,
-        error:
-          "Memory model not configured. Set memoryModel to provider:modelId.",
-        provider: null,
-      };
-    }
-
-    const model = ctx.modelRegistry.find(modelInfo.provider, modelInfo.id) ?? null;
-    if (!model) {
-      return {
-        model: null,
-        apiKey: null,
-        error: `Memory model not found: ${modelInfo.provider}/${modelInfo.id}.`,
-        provider: modelInfo.provider,
-      };
-    }
-
-    const available = await ctx.modelRegistry.getAvailable();
-    const isAvailable = available.some(
-      (item) => item.provider === modelInfo.provider && item.id === modelInfo.id
-    );
-
-    if (!isAvailable) {
-      return {
-        model: null,
-        apiKey: null,
-        error: `No credentials configured for ${modelInfo.provider}/${modelInfo.id}.`,
-        provider: modelInfo.provider,
-      };
-    }
-
-    let apiKey = null;
-    try {
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok) {
-        return {
-          model: null,
-          apiKey: null,
-          error: auth.error || `Failed to resolve credentials for ${modelInfo.provider}/${modelInfo.id}.`,
-          provider: modelInfo.provider,
-        };
-      }
-      apiKey = auth.apiKey;
-    } catch (_error) {
-      return {
-        model: null,
-        apiKey: null,
-        error: `Failed to resolve credentials for ${modelInfo.provider}/${modelInfo.id}.`,
-        provider: modelInfo.provider,
-      };
-    }
-
-    return { model, apiKey, error: null, provider: modelInfo.provider };
-  }
-
-  async function collectExplicitFacts() {
-    const entries = await store.readMemoryEntries();
-    return entries
-      .filter((entry) => entry.tags.includes("explicit"))
-      .map((entry) => entry.text);
-  }
-
+  /**
+   * Save the current session transcript to memstore.
+   * Captures transcript synchronously, then writes to memstore.
+   */
   async function summarizeCurrentSession(ctx, { reason } = {}) {
     await ensureSessionState(ctx);
-    if (!hasActiveMemoryFile()) {
-      if (ctx.hasUI) {
-        ctx.ui.notify("Memory not ready yet; session file not persisted.", "warning");
-      }
-      return null;
-    }
-
-    const { model, apiKey, error } = await resolveMemoryModel(ctx);
-    if (!model) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(error ?? "Memory model unavailable.", "warning");
-      }
-      return null;
-    }
 
     const sessionPath = ctx.sessionManager.getSessionFile() ?? store.sessionPath;
+
+    // Read full normalized transcript (200KB budget covers any session)
     let transcript = "";
-    let usedJsonl = false;
-    let jsonlMissing = false;
     if (sessionPath) {
-      transcript = await readSessionJsonl(sessionPath, {
-        maxChars: config.sessionSummaryMaxChars,
-      });
-      usedJsonl = Boolean(transcript);
-      if (!usedJsonl && sessionPath !== "ephemeral") {
-        jsonlMissing = true;
-      }
+      transcript = await readSessionJsonl(sessionPath, { maxChars: 200000 });
     }
     if (!transcript) {
       transcript = buildTranscriptFromEntries(ctx.sessionManager.getBranch(), {
-        maxChars: config.sessionSummaryMaxChars,
+        maxChars: 200000,
       });
     }
 
-    if (!transcript) {
+    // Skip empty or trivial sessions (less than 200 chars of content)
+    if (!transcript || transcript.length < 200) {
+      if (ctx.hasUI) ctx.ui.notify("Session too short to save.", "info");
       return null;
     }
 
-    const persona = await buildPersonaWithTopics({
-      query: transcript,
-      scope: "summary",
-      maxResults: 2,
-      minScore: 2,
-      ctx,
-    });
+    if (ctx.hasUI) ctx.ui.notify("Saving session...", "info");
 
-    const explicitFacts = await collectExplicitFacts();
-    const summary = await summarizeSessionWithModel({
-      model,
-      apiKey,
-      persona,
-      transcript,
-      explicitFacts,
-      maxTokens: config.memoryModelMaxTokens,
-      temperature: config.memoryModelTemperature,
-    });
-
-    if (!summary) {
-      return null;
-    }
-
-    await maybeSetTopicFromSummary(summary, ctx);
-
-    const stored = await store.upsertSessionSummary(summary, {
-      tags: reason ? [reason] : [],
-    });
-
-    if (process.env.PI_STATEFUL_MEMORY_DEBUG) {
-      if (jsonlMissing) {
-        await store.appendMemories(
-          [
-            `Debug: session JSONL was missing at summary time (${sessionPath}). Summary used in-memory branch instead.`,
-          ],
-          { tags: ["debug", "session-summary"] }
-        );
-      }
-
-      if (usedJsonl) {
-        await store.appendMemories(
-          [`Debug: session summary used JSONL transcript (${sessionPath}).`],
-          { tags: ["debug", "session-summary"] }
-        );
-      }
-    }
-
-    if (ctx.hasUI) {
-      ctx.ui.notify("Session summary saved.", "info");
-    }
-
-    return stored;
-  }
-
-  async function maybeSetTopicFromSummary(summary, ctx) {
-    if (!summary) {
-      return;
-    }
-
-    const slug = slugifyKeywords(summary, 6);
-    if (!slug || slug === "untitled") {
-      return;
-    }
-
-    const newName = store.getSessionFileName(slug);
-    if (newName === store.memoryFile) {
-      topicLocked = true;
-      return;
-    }
-
-    const oldPath = store.memoryFilePath;
-    const newPath = path.join(store.memoryDir, newName);
+    const tags = determineSessionTags(transcript, activeTopics);
 
     try {
-      await fs.access(newPath);
-      topicLocked = true;
-      return;
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
+      await ensureMemstore();
 
-    try {
-      await fs.rename(oldPath, newPath);
+      // Submit save job — returns immediately.
+      // The server handles dedup (delete old entry via origin map) and add.
+      const result = await memstoreClient.submitSave({
+        body: transcript,
+        title: slugifyKeywords(transcript, 8),
+        origin: sessionPath,
+        tags,
+        depth: 2,
+      });
+
+      // Update recency index (no entry ID — proxy manages that via origin map)
+      try {
+        const indexPath = path.join(path.dirname(config.factsFile), "recent-sessions.json");
+        await updateRecencyIndex(indexPath, {
+          sessionPath,
+          timestamp: new Date().toISOString(),
+          tags,
+        });
+      } catch (indexErr) {
+        console.error("[stateful-memory] Recency index update failed:", indexErr.message);
+      }
+
+      if (ctx.hasUI) {
+        const depth = result?.queue_depth ?? 0;
+        const msg = depth > 0
+          ? `Session queued for save (${depth + 1} in queue).`
+          : "Session queued for save.";
+        ctx.ui.notify(msg, "info");
+      }
+      return result;
     } catch (err) {
-      if (err.code === "ENOENT") {
-        // Source file already renamed or never created — nothing to move.
-        return;
-      }
-      throw err;
+      console.error("[stateful-memory] Failed to submit save:", err.message);
+      if (ctx.hasUI) ctx.ui.notify("Session save failed to submit.", "warning");
+      return null;
     }
-    store.setMemoryFile(newName);
-    topicLocked = true;
-    pi.appendEntry(STATE_ENTRY, { memoryFile: newName, topicLocked: true });
   }
 
-  async function buildMemoryIndex() {
-    const files = await store.listMemoryFiles();
-    const index = [];
+  // ── Event Handlers ────────────────────────────────────────────────────
 
-    for (const fileName of files) {
-      const entries = await store.readMemoryFileEntries(fileName);
-      const summaryEntry =
-        entries.find((entry) => entry.tags.includes("session-summary")) ??
-        entries[0];
-      const explicitEntries = entries.filter((entry) =>
-        entry.tags.includes("explicit")
-      );
-      const explicitSnippet = explicitEntries.length
-        ? `Explicit facts:\n${explicitEntries
-            .slice(-3)
-            .map((entry) => `- ${entry.text}`)
-            .join("\n")}`
-        : "";
-
-      index.push({
-        fileName,
-        timestamp: summaryEntry?.timestamp ?? "unknown",
-        sessionPath: summaryEntry?.sessionPath ?? null,
-        summary: [summaryEntry?.text ?? "", explicitSnippet]
-          .filter(Boolean)
-          .join("\n"),
-      });
-    }
-
-    return index;
-  }
-
-  async function selectMemoryFilesByHeuristic(query, files) {
-    const queryTokens = new Set(tokenize(query));
-    if (queryTokens.size === 0) {
-      return [];
-    }
-
-    const scored = [];
-    for (const fileName of files) {
-      const entries = await store.readMemoryFileEntries(fileName);
-      let best = 0;
-      for (const entry of entries) {
-        best = Math.max(best, scoreEntry(entry, queryTokens));
-      }
-      if (best > 0) {
-        scored.push({ fileName, score: best });
-      }
-    }
-
-    return scored
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-      .map((item) => item.fileName);
-  }
-
-  function formatMemoryEntries(fileName, entries) {
-    if (!entries.length) {
-      return [];
-    }
-
-    return entries.map((entry) => {
-      const tagLabel = entry.tags?.length
-        ? ` [tags: ${entry.tags.join(", ")}]`
-        : "";
-      return `[${fileName}] ${entry.text}${tagLabel}`.trim();
-    });
-  }
-
-  // pi 0.65.0+ unified session_start + session_switch into a single event
-  // that fires for all session transitions (startup/reload/new/resume/fork).
-  // Reset per-session caches on any non-startup transition so we don't carry
-  // state from the outgoing session.
   pi.on("session_start", async (event, ctx) => {
     if (event.reason && event.reason !== "startup") {
       sessionInitialized = false;
       lastSessionPath = null;
-      pendingResumeSessionPath = null;
-      pendingSessionInit = false;
-      topicLocked = false;
       activeTopics = new Map();
+      sessionEnriched = false;
+      cachedMemoryContext = "";
+      if (memstoreClient) {
+        memstoreClient.close();
+        memstoreClient = null;
+      }
     }
     await ensureSessionState(ctx);
+
     if (ctx.hasUI) {
-      ctx.ui.setStatus("stateful-memory", "Memory: ready");
+      // Probe backends — use proxy/queue_status (instant, doesn't block search)
+      // instead of memstore_status (which queues behind save jobs)
+      const parts = [];
+      try {
+        await ensureMemstore();
+        const qs = await memstoreClient.queueStatus();
+        const queueInfo = qs.queue_depth > 0 ? `, ${qs.queue_depth} saving` : "";
+        parts.push(`memstore: connected${queueInfo}`);
+      } catch (err) {
+        parts.push(`memstore: ✗ ${err.message.split("\n")[0].slice(0, 40)}`);
+      }
+
+      // Report observation count from entity index
+      try {
+        const index = await readEntityIndex();
+        const entityCount = Object.keys(index).length;
+        parts.push(`entities: ${entityCount}`);
+      } catch (err) {
+        parts.push(`entities: ✗`);
+      }
+
+      const allOk = parts.every(p => !p.includes("✗"));
+      const label = allOk ? "Memory: ready" : "Memory: degraded";
+      ctx.ui.setStatus("stateful-memory", `${label} (${parts.join(" | ")})`);
+    }
+
+    // Render OBSERVATIONS.md from memstore observations + entity index
+    try {
+      await ensureMemstore();
+      const entityIndexPath = getEntityIndexPath();
+      await renderEntityContext(memstoreClient, entityIndexPath, config.observationsFile);
+    } catch (err) {
+      console.error("[stateful-memory] OBSERVATIONS.md render failed:", err.message);
     }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     await ensureSessionState(ctx);
-    await maybeSetTopicFromPrompt(event.prompt, ctx);
 
-    // Score against current user message + previous assistant message for symmetric
-    // topic relevance — brief replies won't drop a topic that was just being discussed.
+    // Score against current user message + previous assistant message
     const lastAssistantMsg = getLastAssistantMessage(ctx);
     const combinedQuery = [event.prompt, lastAssistantMsg].filter(Boolean).join("\n");
 
@@ -652,6 +466,64 @@ export default function (pi) {
         updateActiveTopics: true,
       }),
     ]);
+
+    // First-message enrichment: search memstore for relevant context
+    if (!sessionEnriched && event.prompt?.trim()) {
+      if (ctx.hasUI) ctx.ui.setStatus("stateful-memory-enrich", "Enriching memory...");
+
+      // Check queue before committing to a memstore search
+      let doMemstoreSearch = true;
+      try {
+        await ensureMemstore();
+        const qs = await memstoreClient.queueStatus();
+        if (qs.queue_depth > 0 && ctx.hasUI) {
+          doMemstoreSearch = await ctx.ui.confirm(
+            "Memory enrichment",
+            `memstore has ${qs.queue_depth} save job${qs.queue_depth > 1 ? "s" : ""} in queue. Wait for memory context?`
+          );
+          if (doMemstoreSearch && ctx.hasUI) {
+            ctx.ui.setStatus("stateful-memory-enrich", "Waiting for memstore...");
+          }
+        }
+      } catch (err) {
+        console.error("[stateful-memory] queue check failed:", err.message);
+        doMemstoreSearch = false;
+      }
+
+      let memstoreResult = { entries: [], bodies: [] };
+      if (doMemstoreSearch) {
+        try {
+          await ensureMemstore();
+          const searchResults = await memstoreClient.search(event.prompt, { limit: 5 });
+          const topEntries = searchResults.entries?.slice(0, 3) || [];
+          const bodies = await Promise.all(topEntries.map(e => memstoreClient.show(e.id)));
+          memstoreResult = { entries: topEntries, bodies };
+        } catch (err) {
+          console.error("[stateful-memory] memstore enrichment failed:", err.message);
+        }
+      }
+
+      if (memstoreResult.bodies.length > 0) {
+        cachedMemoryContext = memstoreResult.bodies
+          .map(r => {
+            const body = r.entry.body;
+            const truncated = body.length > 3000
+              ? body.slice(0, 3000) + "\n(truncated)"
+              : body;
+            const sessionDate = extractSessionDate(body) || r.entry.created_at;
+            const dateLabel = formatSessionDate(sessionDate);
+            return `**${r.entry.title}** *(${dateLabel})*\n${truncated}`;
+          })
+          .join("\n\n---\n\n");
+      }
+
+      sessionEnriched = true;
+      if (ctx.hasUI) {
+        ctx.ui.setStatus("stateful-memory-enrich", "");
+        const memCount = memstoreResult.entries.length;
+        ctx.ui.notify(`Memory enriched: ${memCount} memories.`, "info");
+      }
+    }
 
     if (ctx.hasUI) {
       const selectedIds = topicSelection.selected.map((topic) => topic.id);
@@ -672,20 +544,18 @@ export default function (pi) {
     return undefined;
   });
 
-  pi.on("session_before_switch", async (event, ctx) => {
-    if (event.reason === "resume" && event.targetSessionFile) {
-      pendingResumeSessionPath = event.targetSessionFile;
-    }
+  pi.on("session_before_switch", async (_event, ctx) => {
     await summarizeCurrentSession(ctx, { reason: "session-switch" });
   });
 
-  pi.on("session_before_fork", async (_event, ctx) => {
-    await summarizeCurrentSession(ctx, { reason: "session-fork" });
-  });
+  // session_before_fork handler removed — parent session gets its own
+  // shutdown summary; fork sessions get their own independent lifecycle.
 
   pi.on("session_shutdown", async (_event, ctx) => {
     await summarizeCurrentSession(ctx, { reason: "session-shutdown" });
   });
+
+  // ── Tools ─────────────────────────────────────────────────────────────
 
   pi.registerTool({
     name: "list_topics",
@@ -703,12 +573,7 @@ export default function (pi) {
         : ["(no topics found)"];
 
       return {
-        content: [
-          {
-            type: "text",
-            text: lines.join("\n"),
-          },
-        ],
+        content: [{ type: "text", text: lines.join("\n") }],
         details: { topics: metadata },
       };
     },
@@ -726,12 +591,7 @@ export default function (pi) {
       const topic = findTopicById(topics, params.id);
       if (!topic) {
         return {
-          content: [
-            {
-              type: "text",
-              text: `Topic not found: ${params.id}`,
-            },
-          ],
+          content: [{ type: "text", text: `Topic not found: ${params.id}` }],
           details: { topic: null },
         };
       }
@@ -741,12 +601,7 @@ export default function (pi) {
       const text = `# ${heading}\n\n${content.body}`.trim();
 
       return {
-        content: [
-          {
-            type: "text",
-            text,
-          },
-        ],
+        content: [{ type: "text", text }],
         details: { topic: { id: topic.id } },
       };
     },
@@ -756,64 +611,82 @@ export default function (pi) {
     name: "remember",
     label: "Remember",
     description:
-      "Store explicit facts about the user or project for future conversations.",
+      "Store observations about people, projects, decisions, preferences, the environment, or yourself. Each observation is appended to the named entity's history in the structured memory store. Observations should be self-contained.",
     parameters: Type.Object({
       items: Type.Array(
-        Type.String({
-          description: "Concise facts to remember.",
-        })
+        Type.String({ description: "Self-contained observations to store." })
       ),
-      target: Type.Optional(
-        StringEnum(["memory", "profile"], {
-          description: "Store in memory log or user profile.",
+      target: StringEnum(
+        ["person", "project", "decision", "preference", "environment", "self"],
+        { description: "Entity type for this observation." }
+      ),
+      name: Type.Optional(
+        Type.String({
+          description: "Entity name. Defaults: person→Neon, self→Monika, environment→stanza.",
         })
       ),
       tags: Type.Optional(
-        Type.Array(
-          Type.String({ description: "Optional tags for future recall." })
-        )
+        Type.Array(Type.String({ description: "Optional tags." }))
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      await ensureSessionState(ctx);
-      if (!hasActiveMemoryFile()) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "Memory not ready yet; session file not persisted. Try again in a moment.",
-            },
-          ],
-          details: { stored: [] },
-        };
-      }
-      const target = params.target ?? "memory";
-
-      if (target === "profile") {
-        const stored = await store.appendFacts(params.items);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Saved ${stored.length} fact(s) to pinned facts.`,
-            },
-          ],
-          details: { stored },
-        };
-      }
-
-      const tags = ["explicit", ...(params.tags ?? [])];
-      const stored = await store.appendMemories(params.items, { tags });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Saved ${stored.length} memory item(s).`,
-          },
-        ],
-        details: { stored },
+      // Entity name defaults
+      const DEFAULTS = {
+        person: "Neon",
+        self: "Monika",
+        environment: "stanza",
+        preference: "Neon",
       };
+
+      // Entity name aliases for normalization
+      const ALIASES = {
+        "the zeta directive": "TheZetaDirective",
+        "tzd": "TheZetaDirective",
+        "the novel": "TheZetaDirective",
+        "zeta directive": "TheZetaDirective",
+      };
+
+      // Map tool-facing target types to stored entity types
+      // Keeps compatibility with migrated Neotoma data (person→sophont)
+      const TYPE_MAP = { person: "sophont" };
+      const entityType = TYPE_MAP[params.target] || params.target;
+
+      let entityName = params.name?.trim() || DEFAULTS[params.target] || params.target;
+      const normalized = entityName.toLowerCase();
+      if (ALIASES[normalized]) entityName = ALIASES[normalized];
+
+      try {
+        await ensureMemstore();
+
+        // Store each observation item as a separate observation in memstore
+        const results = [];
+        for (const item of params.items) {
+          const result = await memstoreClient.addObservation({
+            entity_type: entityType,
+            entity_name: entityName,
+            body: item,
+            tags: params.tags || [],
+          });
+          results.push(result);
+        }
+
+        // Update local entity index
+        try {
+          await updateEntityIndex(entityType, entityName, params.items.length);
+        } catch (indexErr) {
+          console.error("[stateful-memory] entity-index update failed:", indexErr.message);
+        }
+
+        return {
+          content: [{ type: "text", text: `Stored ${params.items.length} observation(s) for ${params.target}:${entityName}.` }],
+          details: { target: params.target, name: entityName, count: params.items.length },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to store observations: ${err.message}` }],
+          details: { error: err.message },
+        };
+      }
     },
   });
 
@@ -823,9 +696,7 @@ export default function (pi) {
     description: "Summarize the current session into long-term memory.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const stored = await summarizeCurrentSession(ctx, {
-        reason: "manual",
-      });
+      const stored = await summarizeCurrentSession(ctx, { reason: "manual" });
 
       return {
         content: [
@@ -851,132 +722,59 @@ export default function (pi) {
       }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      await ensureSessionState(ctx);
-      if (!hasActiveMemoryFile()) {
+      try {
+        await ensureMemstore();
+      } catch (err) {
         return {
-          content: [
-            {
-              type: "text",
-              text: "Memory not ready yet; session file not persisted. Try again in a moment.",
-            },
-          ],
-          details: { memories: [] },
+          content: [{ type: "text", text: `Memory store unavailable: ${err.message}` }],
+          details: {},
         };
       }
 
-      const { model, apiKey, error, provider } = await resolveMemoryModel(ctx);
-      if (!model) {
-        let available = [];
-        try {
-          const models = await ctx.modelRegistry.getAvailable();
-          available = provider
-            ? models.filter((item) => item.provider === provider).map((item) => item.id)
-            : models.map((item) => `${item.provider}/${item.id}`);
-        } catch (_err) {
-          available = [];
-        }
+      // Search memstore sessions
+      const searchResults = await memstoreClient.search(params.query, { limit: 5 });
+      const topEntries = searchResults.entries?.slice(0, 3) || [];
+      const bodies = await Promise.all(topEntries.map(e => memstoreClient.show(e.id)));
 
-        const availability = available.length
-          ? `Available models: ${available.slice(0, 8).join(", ")}${
-              available.length > 8 ? "..." : ""
-            }`
-          : "No available models were found.";
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `${error ?? "Memory model unavailable."} ${availability}`.trim(),
-            },
-          ],
-          details: { memories: [], error, available },
-        };
-      }
-
-      const memoryIndex = await buildMemoryIndex();
-      if (memoryIndex.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "I don't have any saved session summaries yet.",
-            },
-          ],
-          details: { memories: [] },
-        };
-      }
-
-      const persona = await buildPersonaWithTopics({
-        query: params.query,
-        scope: "recall",
-        maxResults: 2,
-        minScore: 1,
-        ctx,
-      });
-      const plan = await planRecallWithModel({
-        model,
-        apiKey,
-        persona,
-        query: params.query,
-        memoryIndex,
-        maxTokens: config.memoryModelMaxTokens,
-        temperature: config.memoryModelTemperature,
+      const memoryLines = bodies.map(r => {
+        const e = r.entry;
+        const sessionDate = extractSessionDate(e.body) || e.created_at;
+        const dateLabel = formatSessionDate(sessionDate);
+        return `### ${e.title}\n*${dateLabel} | depth ${e.depth} | tags: ${(e.tags || []).join(", ")}*\n\n${e.body}`;
       });
 
-      if (plan.memoryFiles.length === 0) {
-        const fallback = await selectMemoryFilesByHeuristic(
-          params.query,
-          memoryIndex.map((item) => item.fileName)
-        );
-        plan.memoryFiles = fallback;
-      }
-
-      const selectedMemories = [];
-      const sessionExcerpts = [];
-      const seenSessions = new Set();
-
-      for (const fileName of plan.memoryFiles) {
-        const entries = await store.readMemoryFileEntries(fileName);
-        selectedMemories.push(...formatMemoryEntries(fileName, entries));
-
-        const sessionPath = entries.find((entry) => entry.sessionPath)?.sessionPath;
-        if (plan.needsSessionDetails && sessionPath && !seenSessions.has(sessionPath)) {
-          const excerpt = await readSessionJsonl(sessionPath, {
-            maxChars: config.recallMaxSessionChars,
+      // Search memstore observations
+      let observationSection = "";
+      try {
+        const obsResults = await memstoreClient.searchObservations(params.query, { limit: 5 });
+        const observations = obsResults.observations || [];
+        if (observations.length > 0) {
+          const obsLines = observations.map(o => {
+            const date = o.created_at
+              ? new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+              : "unknown";
+            return `**${o.entity_name}** (${o.entity_type}) — *${date}*\n${o.body}`;
           });
-          if (excerpt) {
-            sessionExcerpts.push({ sessionPath, excerpt });
-            seenSessions.add(sessionPath);
-          }
+          observationSection = "\n\n## Recalled Observations\n\n" + obsLines.join("\n\n---\n\n");
         }
+      } catch (err) {
+        console.error("[stateful-memory] observation search failed:", err.message);
       }
 
-      const response = await recallWithModel({
-        model,
-        apiKey,
-        persona,
-        query: params.query,
-        selectedMemories,
-        sessionExcerpts,
-        maxTokens: config.recallModelMaxTokens,
-        temperature: config.memoryModelTemperature,
-      });
+      const text = memoryLines.length > 0
+        ? `## Recalled Sessions\n\n${memoryLines.join("\n\n---\n\n")}${observationSection}`
+        : observationSection
+          ? observationSection.trim()
+          : "No relevant memories found.";
 
       return {
-        content: [
-          {
-            type: "text",
-            text: response || "I couldn't recall anything useful.",
-          },
-        ],
-        details: {
-          plan,
-          selectedMemories,
-          sessionExcerpts,
-        },
+        content: [{ type: "text", text }],
+        details: { entries: topEntries, hasObservations: Boolean(observationSection) },
       };
     },
   });
+
+  // ── Commands ──────────────────────────────────────────────────────────
 
   pi.registerCommand("sleep", {
     description: "Run the sleep cycle: capture session, write WAKE.md, curate FACTS.md, dream. Then open a fresh session.",
@@ -993,11 +791,6 @@ export default function (pi) {
       }
 
       await ensureSessionState(ctx);
-
-      if (!hasActiveMemoryFile()) {
-        ctx.ui.notify("Memory not ready — session file not persisted yet. Try again in a moment.", "warning");
-        return;
-      }
 
       try {
         await runSleepCycle({

@@ -44,9 +44,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
       "free from the current conversation history. It works through the task using all",
       "available tools and returns a summary when done.",
       "",
-      "Use delegate for work that would dominate this context window: reading many files,",
-      "extended research, code review, analysis tasks, or anything requiring many tool calls",
-      "in sequence. Short and focused actions are better done directly.",
+      "Delegate only when the trunk session needs an answer more than it needs the",
+      "understanding, and when the result can be validated from a summary, diff, test,",
+      "citation, or log. The trunk session should own orientation, problem framing,",
+      "architectural judgment, and context likely to shape later decisions.",
       "",
       "The sub-session's work is automatically summarized into long-term memory when it",
       "finishes. Use remember() within the task for anything you want to specifically flag",
@@ -55,10 +56,19 @@ export default function delegateExtension(pi: ExtensionAPI) {
       "Max delegation depth: 3 levels from your main thread.",
     ].join("\n"),
 
-    promptSnippet: "Spawn a focused sub-session to handle tasks that would dominate the current context window",
+    promptSnippet: "Spawn a focused sub-session for bounded tasks whose results can be validated from a summary, diff, test, citation, or log",
 
     promptGuidelines: [
-      "Use delegate for multi-file reading, extended research, code review, or any task requiring many sequential tool calls. Do short, focused actions directly.",
+      "The trunk session owns orientation, problem framing, architectural judgment, and any context likely to shape later decisions. Delegates are for bounded subproblems, not outsourcing the main thread's understanding.",
+      "Before delegating, ask: does the trunk need understanding, or only an answer? If the trunk needs to build or refine its working model, do the reading/investigation directly. If it only needs a specific answer, result, or patch, delegation may be appropriate.",
+      "Will the raw context matter later? If the details are likely to affect future decisions, keep them in trunk. If the details are disposable after a summary, delegate.",
+      "Can the result be validated cleanly? Good delegate tasks can usually be checked by tests, diffs, exact citations, logs, or a concise factual answer. Avoid delegation when success depends on nuance, taste, identity/persona judgment, or broad architectural tradeoffs.",
+      "Does the task depend on live session nuance? A small/testable output can still be a poor delegate task if quality depends on accumulated conversation context, intent, wording, or framing that would be lossy to brief. Keep that work in trunk unless the needed nuance can be compressed into a clear, low-loss task description.",
+      "Use delegates for bounded, separable work: repetitive searches, mechanical migration sweeps, isolated implementation tasks, test/debug loops, narrow fact-finding, mechanical doc cleanup, or reading a large body of context to answer one specific disposable question.",
+      "Do not delegate first-pass project orientation, broad investigation, design synthesis, persona/prompt judgment, nuanced documentation edits, or context that the trunk session will need in order to supervise the work intelligently.",
+      "Examples — do not delegate: investigating how a repo works; understanding Pi session lineage to design forum-native handoff; reviewing prompt/persona behavior; choosing feature architecture; reading manageable core docs for a system you are about to modify; rewriting guidance to reflect a nuanced discussion from the current session.",
+      "Examples — good delegate candidates: searching files for deprecated imports with exact paths/lines; applying an already-decided migration and running tests; finding exact docs/API references after the trunk has framed the design; reading a large generated log to identify the first causal error; reproducing an isolated bug with commands/output; inspecting many generated files for a specific malformed pattern; fixing typos or applying already-chosen wording across many docs.",
+      "Mixed cases depend on phase and nuance: if docs/logs/tests may teach concepts or preserve live-session intent the trunk will use later, handle them directly; if they answer one narrow compatibility, citation, mechanical cleanup, or red/green question, delegate.",
       "Delegated sub-sessions have your full identity and memory but a clean context window. Their work is summarized into long-term memory automatically.",
       "Max delegation depth is 3 levels. At depth 3, complete tasks directly — do not call delegate.",
     ],
@@ -107,6 +117,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
         // If this session is aborted (timeout cascade, user interrupt, etc.),
         // the child fork aborts too rather than running on as a zombie.
         parentSignal: signal,
+        parentSessionFile: sessionFile === "trunk" ? undefined : sessionFile,
       });
 
       // Partial / recovery results are returned as regular text so the calling
