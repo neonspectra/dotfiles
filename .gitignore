@@ -21,7 +21,6 @@
 # ssh
 !.ssh/
 .ssh/*
-!.ssh/config
 
 # themes
 !.gtkrc-2.0
@@ -47,29 +46,10 @@
 !.config/yabai/
 !.config/skhd/
 
-# pi
+# pi (runtime source moved to ~/repos/monika; keep only a pointer)
 !.pi/
 .pi/*
-!.pi/agent/
-.pi/agent/*
-!.pi/agent/settings.json
-!.pi/agent/keybindings.json
-!.pi/agent/extensions/
-!.pi/agent/extensions/**
-.pi/agent/extensions/**/node_modules/
-.pi/agent/extensions/**/node_modules/*
-.pi/agent/auth.json
-.pi/agent/sessions/
-.pi/agent/sessions/*
-!.pi/stateful-memory/
-.pi/stateful-memory/*
-!.pi/stateful-memory/SOUL.md
-!.pi/stateful-memory/PERSONALITY_MATRIX.md
-!.pi/stateful-memory/REGISTER.md
-!.pi/stateful-memory/STYLE.md
-!.pi/stateful-memory/SLEEP.md
-!.pi/stateful-memory/IMPLEMENTATION.md
-!.pi/stateful-memory/persona_topics/
+!.pi/README.md
 
 # Local scripts folder in .config
 !.config/bin/
